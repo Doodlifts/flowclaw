@@ -1,0 +1,150 @@
+{
+	"contracts": {
+		"AgentEncryption": {
+			"source": "./cadence/contracts/AgentEncryption.cdc",
+			"aliases": {
+				"emulator": "e467b9dd11fa00df",
+				"testnet": "808983d30a46aee2",
+				"mainnet": ""
+			}
+		},
+		"AgentExtensions": {
+			"source": "./cadence/contracts/AgentExtensions.cdc",
+			"aliases": {
+				"emulator": "e467b9dd11fa00df",
+				"testnet": "808983d30a46aee2",
+				"mainnet": ""
+			}
+		},
+		"AgentLifecycleHooks": {
+			"source": "./cadence/contracts/AgentLifecycleHooks.cdc",
+			"aliases": {
+				"emulator": "e467b9dd11fa00df",
+				"testnet": "808983d30a46aee2",
+				"mainnet": ""
+			}
+		},
+		"AgentMemory": {
+			"source": "./cadence/contracts/AgentMemory.cdc",
+			"aliases": {
+				"emulator": "e467b9dd11fa00df",
+				"testnet": "808983d30a46aee2",
+				"mainnet": ""
+			}
+		},
+		"AgentRegistry": {
+			"source": "./cadence/contracts/AgentRegistry.cdc",
+			"aliases": {
+				"emulator": "e467b9dd11fa00df",
+				"testnet": "808983d30a46aee2",
+				"mainnet": ""
+			}
+		},
+		"AgentScheduler": {
+			"source": "./cadence/contracts/AgentScheduler.cdc",
+			"aliases": {
+				"emulator": "e467b9dd11fa00df",
+				"testnet": "808983d30a46aee2",
+				"mainnet": ""
+			}
+		},
+		"AgentSession": {
+			"source": "./cadence/contracts/AgentSession.cdc",
+			"aliases": {
+				"emulator": "e467b9dd11fa00df",
+				"testnet": "808983d30a46aee2",
+				"mainnet": ""
+			}
+		},
+		"FlowClaw": {
+			"source": "./cadence/contracts/FlowClaw.cdc",
+			"aliases": {
+				"emulator": "e467b9dd11fa00df",
+				"testnet": "808983d30a46aee2",
+				"mainnet": ""
+			}
+		},
+		"InferenceOracle": {
+			"source": "./cadence/contracts/InferenceOracle.cdc",
+			"aliases": {
+				"emulator": "e467b9dd11fa00df",
+				"testnet": "808983d30a46aee2",
+				"mainnet": ""
+			}
+		},
+		"ToolRegistry": {
+			"source": "./cadence/contracts/ToolRegistry.cdc",
+			"aliases": {
+				"emulator": "e467b9dd11fa00df",
+				"testnet": "808983d30a46aee2",
+				"mainnet": ""
+			}
+		},
+		"CognitiveMemory": {
+			"source": "./cadence/contracts/CognitiveMemory.cdc",
+			"aliases": {
+				"emulator": "e467b9dd11fa00df",
+				"testnet": "808983d30a46aee2",
+				"mainnet": ""
+			}
+		}
+	},
+	"networks": {
+		"emulator": "127.0.0.1:3569",
+		"mainnet": "access.mainnet.nodes.onflow.org:9000",
+		"testnet": "access.devnet.nodes.onflow.org:9000"
+	},
+	"accounts": {
+		"emulator-account": {
+			"address": "e467b9dd11fa00df",
+			"key": {
+				"type": "hex",
+				"index": 0,
+				"signatureAlgorithm": "ECDSA_P256",
+				"hashAlgorithm": "SHA3_256",
+				"privateKey": "${FLOW_EMULATOR_PRIVATE_KEY}"
+			}
+		},
+		"flowclawtest": {
+			"address": "808983d30a46aee2",
+			"key": {
+				"type": "file",
+				"location": "flowclawtest.pkey"
+			}
+		}
+	},
+	"deployments": {
+		"emulator": {
+			"emulator-account": [
+				"AgentRegistry",
+				"AgentSession",
+				"InferenceOracle",
+				"ToolRegistry",
+				"AgentMemory",
+				"AgentScheduler",
+				"AgentLifecycleHooks",
+				"AgentEncryption",
+				"AgentExtensions",
+				"CognitiveMemory",
+				"FlowClaw"
+			]
+		},
+		"testnet": {
+			"flowclawtest": [
+				"AgentRegistry",
+				"AgentSession",
+				"InferenceOracle",
+				"ToolRegistry",
+				"AgentMemory",
+				"AgentScheduler",
+				"AgentLifecycleHooks",
+				"AgentEncryption",
+				"AgentExtensions",
+				"CognitiveMemory",
+				"FlowClaw"
+			]
+		},
+		"mainnet": {
+		}
+	}
+}

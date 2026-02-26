@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FlowClaw — Test Preview</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script type="module">
+    // Provide lucide-react as window global for the JSX
+    import { Shield, Cpu, MessageSquare, LayoutDashboard, Puzzle, Clock, Brain,
+      Send, Plus, Trash2, Play, Pause, Settings, ChevronRight, Search,
+      Zap, Lock, Unlock, AlertTriangle, CheckCircle, XCircle, RefreshCw,
+      Activity, Database, Globe, Terminal, ArrowUpRight, Download, Upload,
+      Hash, Tag, Calendar, BarChart3, Layers, Box, Eye, EyeOff, Power,
+      Wallet, LogOut, Copy, ExternalLink, Star, TrendingUp, ChevronDown
+    } from "https://cdn.jsdelivr.net/npm/lucide-react@0.263.1/+esm";
+
+    window.lucideReact = {
+      Shield, Cpu, MessageSquare, LayoutDashboard, Puzzle, Clock, Brain,
+      Send, Plus, Trash2, Play, Pause, Settings, ChevronRight, Search,
+      Zap, Lock, Unlock, AlertTriangle, CheckCircle, XCircle, RefreshCw,
+      Activity, Database, Globe, Terminal, ArrowUpRight, Download, Upload,
+      Hash, Tag, Calendar, BarChart3, Layers, Box, Eye, EyeOff, Power,
+      Wallet, LogOut, Copy, ExternalLink, Star, TrendingUp, ChevronDown
+    };
+  </script>
+  <style>
+    body { margin: 0; background: #0f172a; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    #root { min-height: 100vh; }
+    .loading-screen { display: flex; align-items: center; justify-content: center; height: 100vh; color: #94a3b8; font-size: 18px; }
+  </style>
+</head>
+<body>
+  <div id="root"><div class="loading-screen">Loading FlowClaw UI...</div></div>
+
+  <!-- Load the component after lucide is ready -->
+  <script>
+    // Wait for lucide to load, then load the JSX
+    function waitForLucide() {
+      if (window.lucideReact) {
+        loadComponent();
+      } else {
+        setTimeout(waitForLucide, 100);
+      }
+    }
+
+    function loadComponent() {
+      fetch('./flowclaw-ui.jsx')
+        .then(r => r.text())
+        .then(jsx => {
+          // Replace the import statements with window references
+          let code = jsx.replace(
+            /import \{[^}]+\} from ["']lucide-react["'];?/,
+            'const { Shield, Cpu, MessageSquare, LayoutDashboard, Puzzle, Clock, Brain, Send, Plus, Trash2, Play, Pause, Settings, ChevronRight, Search, Zap, Lock, Unlock, AlertTriangle, CheckCircle, XCircle, RefreshCw, Activity, Database, Globe, Terminal, ArrowUpRight, Download, Upload, Hash, Tag, Calendar, BarChart3, Layers, Box, Eye, EyeOff, Power, Wallet, LogOut, Copy, ExternalLink, Star, TrendingUp, ChevronDown } = window.lucideReact;'
+          );
+          code = code.replace(
+            /import \{[^}]+\} from ["']react["'];?/,
+            'const { useState, useEffect, useRef } = React;'
+          );
+          // Replace export default with window assignment
+          code = code.replace(/export default (\w+);?/, 'window.FlowClawApp = $1;');
+
+          // Transpile JSX
+          const transformed = Babel.transform(code, { presets: ['react'] }).code;
+
+          // Execute
+          const script = document.createElement('script');
+          script.textContent = transformed + '\nReactDOM.render(React.createElement(window.FlowClawApp), document.getElementById("root"));';
+          document.body.appendChild(script);
+        })
+        .catch(err => {
+          document.getElementById('root').innerHTML =
+            '<div class="loading-screen" style="color:#ef4444">Error loading UI: ' + err.message + '</div>';
+        });
+    }
+
+    setTimeout(waitForLucide, 500);
+  </script>
+</body>
+</html>

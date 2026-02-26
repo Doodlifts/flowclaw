@@ -1,0 +1,71 @@
+version: '3.8'
+
+services:
+  emulator:
+    image: gcr.io/flow-container-registry/emulator:latest
+    container_name: flow-emulator
+    ports:
+      - "3569:3569"
+      - "8888:8888"
+    volumes:
+      - ./flow.json:/flow.json
+      - ./cadence:/cadence
+    environment:
+      - FLOW_SERVICEPRIVATEKEY=${FLOW_EMULATOR_PRIVATE_KEY}
+      - FLOW_SERVICEKEY=${FLOW_EMULATOR_SERVICE_KEY}
+    networks:
+      - flowclaw-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8888/v1/collections"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  relay:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: flowclaw-relay
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+    env_file:
+      - .env
+    depends_on:
+      emulator:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - flowclaw-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend.Dockerfile
+    container_name: flowclaw-frontend
+    working_dir: /app/frontend
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    depends_on:
+      relay:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - flowclaw-network
+    volumes:
+      - ./frontend:/app/frontend
+      - /app/frontend/node_modules
+
+networks:
+  flowclaw-network:
+    driver: bridge

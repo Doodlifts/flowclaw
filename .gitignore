@@ -1,0 +1,33 @@
+# Keys and secrets
+*.pkey
+.env
+*/.env
+frontend/.env
+relay/.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Node
+node_modules/
+frontend/dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Flow
+.flowclaw/
+
+# Logs and runtime
+*.log
+*.pid
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
