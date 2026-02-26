@@ -4,88 +4,77 @@
 			"source": "./cadence/contracts/AgentEncryption.cdc",
 			"aliases": {
 				"emulator": "e467b9dd11fa00df",
-				"testnet": "808983d30a46aee2",
-				"mainnet": ""
+				"testnet": "808983d30a46aee2"
 			}
 		},
 		"AgentExtensions": {
 			"source": "./cadence/contracts/AgentExtensions.cdc",
 			"aliases": {
 				"emulator": "e467b9dd11fa00df",
-				"testnet": "808983d30a46aee2",
-				"mainnet": ""
+				"testnet": "808983d30a46aee2"
 			}
 		},
 		"AgentLifecycleHooks": {
 			"source": "./cadence/contracts/AgentLifecycleHooks.cdc",
 			"aliases": {
 				"emulator": "e467b9dd11fa00df",
-				"testnet": "808983d30a46aee2",
-				"mainnet": ""
+				"testnet": "808983d30a46aee2"
 			}
 		},
 		"AgentMemory": {
 			"source": "./cadence/contracts/AgentMemory.cdc",
 			"aliases": {
 				"emulator": "e467b9dd11fa00df",
-				"testnet": "808983d30a46aee2",
-				"mainnet": ""
+				"testnet": "808983d30a46aee2"
 			}
 		},
 		"AgentRegistry": {
 			"source": "./cadence/contracts/AgentRegistry.cdc",
 			"aliases": {
 				"emulator": "e467b9dd11fa00df",
-				"testnet": "808983d30a46aee2",
-				"mainnet": ""
+				"testnet": "808983d30a46aee2"
 			}
 		},
 		"AgentScheduler": {
 			"source": "./cadence/contracts/AgentScheduler.cdc",
 			"aliases": {
 				"emulator": "e467b9dd11fa00df",
-				"testnet": "808983d30a46aee2",
-				"mainnet": ""
+				"testnet": "808983d30a46aee2"
 			}
 		},
 		"AgentSession": {
 			"source": "./cadence/contracts/AgentSession.cdc",
 			"aliases": {
 				"emulator": "e467b9dd11fa00df",
-				"testnet": "808983d30a46aee2",
-				"mainnet": ""
+				"testnet": "808983d30a46aee2"
 			}
 		},
 		"FlowClaw": {
 			"source": "./cadence/contracts/FlowClaw.cdc",
 			"aliases": {
 				"emulator": "e467b9dd11fa00df",
-				"testnet": "808983d30a46aee2",
-				"mainnet": ""
+				"testnet": "808983d30a46aee2"
 			}
 		},
 		"InferenceOracle": {
 			"source": "./cadence/contracts/InferenceOracle.cdc",
 			"aliases": {
 				"emulator": "e467b9dd11fa00df",
-				"testnet": "808983d30a46aee2",
-				"mainnet": ""
+				"testnet": "808983d30a46aee2"
 			}
 		},
 		"ToolRegistry": {
 			"source": "./cadence/contracts/ToolRegistry.cdc",
 			"aliases": {
 				"emulator": "e467b9dd11fa00df",
-				"testnet": "808983d30a46aee2",
-				"mainnet": ""
+				"testnet": "808983d30a46aee2"
 			}
 		},
 		"CognitiveMemory": {
 			"source": "./cadence/contracts/CognitiveMemory.cdc",
 			"aliases": {
 				"emulator": "e467b9dd11fa00df",
-				"testnet": "808983d30a46aee2",
-				"mainnet": ""
+				"testnet": "808983d30a46aee2"
 			}
 		}
 	},
@@ -143,8 +132,6 @@
 				"CognitiveMemory",
 				"FlowClaw"
 			]
-		},
-		"mainnet": {
 		}
 	}
 }
