@@ -28,9 +28,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY relay/ ./relay/
 COPY cadence/ ./cadence/
 COPY flow.json ./
+COPY entrypoint.sh ./
 
 # Copy frontend build output
 COPY --from=frontend-build /app/frontend/dist ./frontend/dist
+
+# Make entrypoint executable
+RUN chmod +x /app/entrypoint.sh
 
 # Set proper ownership
 RUN chown -R flowuser:flowuser /app
@@ -38,13 +42,6 @@ RUN chown -R flowuser:flowuser /app
 # Switch to non-root user
 USER flowuser
 
-# Default port
-ENV PORT=8000
 EXPOSE 8000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8000/status || exit 1
-
-# Run via shell script so $PORT is properly expanded
-CMD ["/bin/sh", "-c", "uvicorn relay.api:app --host 0.0.0.0 --port $PORT"]
+ENTRYPOINT ["/app/entrypoint.sh"]
