@@ -16,18 +16,6 @@ import AgentCanvas from "./AgentCanvas";
 import MarkdownText from "./MarkdownText";
 
 // ============================================================
-// FALLBACK DATA — used when API is unavailable
-// ============================================================
-const MOCK_EXTENSIONS = [
-  { id: 1, name: "sentiment-guard", description: "Analyzes agent responses for sentiment before sending.", version: "1.0.0", author: "0xaaa111bbb222", category: "hook", tags: ["safety","moderation"], installCount: 342, isAudited: true, installed: true, enabled: true },
-  { id: 2, name: "flow-defi-tools", description: "DeFi tools for Flow: token swaps, balance checks, pool stats.", version: "1.0.0", author: "0xccc333ddd444", category: "tool", tags: ["defi","trading"], installCount: 1205, isAudited: true, installed: true, enabled: true },
-  { id: 3, name: "conversation-summarizer", description: "Auto-summarizes long conversations for context continuity.", version: "1.0.0", author: "0xeee555fff666", category: "composite", tags: ["memory","summarization"], installCount: 891, isAudited: true, installed: false, enabled: false },
-  { id: 4, name: "telegram-channel", description: "Telegram bot channel adapter for FlowClaw agents.", version: "0.9.0", author: "0x777888999aaa", category: "channel", tags: ["telegram","messaging"], installCount: 567, isAudited: false, installed: false, enabled: false },
-  { id: 5, name: "nft-tools", description: "Mint, transfer, and query NFTs on Flow.", version: "1.2.0", author: "0xbbb111ccc222", category: "tool", tags: ["nft","flow"], installCount: 423, isAudited: true, installed: false, enabled: false },
-  { id: 6, name: "code-sandbox", description: "Sandboxed code execution for your agent.", version: "0.8.0", author: "0xddd333eee444", category: "tool", tags: ["code","sandbox"], installCount: 298, isAudited: false, installed: false, enabled: false },
-];
-
-// ============================================================
 // UTILITY COMPONENTS
 // ============================================================
 const Badge = ({ children, variant = "default" }) => {
@@ -100,7 +88,7 @@ const OnboardingTour = ({ onComplete }) => {
   const [step, setStep] = useState(0);
   const steps = [
     { title: "Welcome to FlowClaw!", description: "Your private AI agent running on the Flow blockchain. Every conversation is encrypted and stored on-chain — only you can read it.", icon: Cpu },
-    { title: "Chat with your agent", description: "Send messages and get AI-powered responses via Venice AI. Each message is an on-chain transaction you can verify on FlowScan.", icon: MessageSquare },
+    { title: "Chat with your agent", description: "Send messages and get AI-powered responses via LLM. Each message is an on-chain transaction you can verify on FlowScan.", icon: MessageSquare },
     { title: "Schedule automation", description: "Set up recurring tasks — price alerts, summaries, reminders. Your agent works even when you're offline.", icon: Clock },
     { title: "Extend with tools", description: "Browse the permissionless marketplace. Install DeFi tools, memory plugins, notification channels, and more.", icon: Puzzle },
   ];
@@ -135,7 +123,7 @@ const OnboardingTour = ({ onComplete }) => {
 };
 
 // ============================================================
-// CHAT TAB — connected to Venice AI via relay API
+// CHAT TAB — connected to user's LLM provider via relay API
 // ============================================================
 const AUTOMATED_SESSION = { id: -1, label: "Automated Tasks", messageCount: 0, totalTokens: 0, isOpen: true, isAutomated: true };
 
@@ -353,7 +341,7 @@ const ChatTab = () => {
                   <Lock size={10} className="text-emerald-400" /> E2E encrypted
                 </span>
                 <span className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-900 border border-zinc-800 rounded-full text-xs text-zinc-400">
-                  <Zap size={10} className="text-blue-400" /> Venice AI
+                  <Zap size={10} className="text-blue-400" /> LLM
                 </span>
                 <span className="flex items-center gap-1.5 px-3 py-1.5 bg-zinc-900 border border-zinc-800 rounded-full text-xs text-zinc-400">
                   <Database size={10} className="text-purple-400" /> On-chain storage
@@ -425,7 +413,7 @@ const ChatTab = () => {
               <div className="bg-zinc-900 border border-zinc-800 rounded-2xl px-4 py-3">
                 <div className="flex items-center gap-2 text-xs text-zinc-400">
                   <Loader2 size={12} className="animate-spin" />
-                  <span>Thinking via Venice AI...</span>
+                  <span>Thinking via LLM...</span>
                 </div>
               </div>
             </div>
@@ -464,7 +452,7 @@ const ChatTab = () => {
               </div>
               <div className="flex items-center gap-3 mt-2 px-1 text-xs text-zinc-600">
                 <span className="flex items-center gap-1"><Lock size={9} /> E2E encrypted on-chain</span>
-                <span className="flex items-center gap-1"><Zap size={9} /> Venice AI (Sonnet 4.6)</span>
+                <span className="flex items-center gap-1"><Zap size={9} /> LLM</span>
                 <span className="flex items-center gap-1"><Hash size={9} /> Content hashed</span>
               </div>
             </>
@@ -519,7 +507,7 @@ const DashboardTab = () => {
               <Badge variant={status?.connected ? "success" : "danger"}>
                 {status?.connected ? "Connected" : "Disconnected"}
               </Badge>
-              <span className="text-xs text-zinc-500">venice/claude-sonnet-4-6</span>
+              <span className="text-xs text-zinc-500">Your provider</span>
             </div>
           </div>
         </div>
@@ -619,7 +607,7 @@ const DashboardTab = () => {
             <div className="w-5 h-5 rounded-full bg-emerald-900/50 flex items-center justify-center shrink-0 mt-0.5">
               <span className="text-emerald-400 text-xs font-bold">3</span>
             </div>
-            <span>Venice AI (Sonnet 4.6) generates a response</span>
+            <span>LLM generates a response</span>
           </div>
           <div className="flex items-start gap-2">
             <div className="w-5 h-5 rounded-full bg-emerald-900/50 flex items-center justify-center shrink-0 mt-0.5">
@@ -669,26 +657,28 @@ const DashboardTab = () => {
 // EXTENSIONS TAB — real on-chain extensions
 // ============================================================
 const ExtensionsTab = () => {
-  const [filter, setFilter] = useState("all");
+  const [view, setView] = useState("installed"); // "installed" or "marketplace"
   const [search, setSearch] = useState("");
-  const [extensions, setExtensions] = useState([]);
+  const [installed, setInstalled] = useState([]);
+  const [marketplace, setMarketplace] = useState([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(null);
   const [error, setError] = useState(null);
   const [showPublish, setShowPublish] = useState(false);
   const [publishForm, setPublishForm] = useState({ name: "", description: "", version: "1.0.0", category: 0, sourceHash: "", tags: "" });
 
-  useEffect(() => {
-    loadExtensions();
-  }, []);
+  useEffect(() => { loadExtensions(); }, []);
 
   const loadExtensions = async () => {
     try {
       const data = await api.getExtensions();
-      setExtensions(data.length > 0 ? data : MOCK_EXTENSIONS);
+      const all = data || [];
+      setInstalled(all.filter(e => e.installed || e.isInstalled));
+      setMarketplace(all.filter(e => !e.installed && !e.isInstalled));
     } catch (err) {
       console.warn("Failed to load extensions:", err.message);
-      setExtensions(MOCK_EXTENSIONS);
+      setInstalled([]);
+      setMarketplace([]);
     } finally {
       setLoading(false);
     }
@@ -699,7 +689,7 @@ const ExtensionsTab = () => {
     setError(null);
     try {
       await api.installExtension(id);
-      setExtensions(prev => prev.map(e => e.id === id ? { ...e, installed: true, isInstalled: true, enabled: true } : e));
+      await loadExtensions();
     } catch (err) {
       setError(`Install failed: ${err.message}`);
     } finally {
@@ -712,7 +702,7 @@ const ExtensionsTab = () => {
     setError(null);
     try {
       await api.uninstallExtension(id);
-      setExtensions(prev => prev.map(e => e.id === id ? { ...e, installed: false, isInstalled: false, enabled: false } : e));
+      await loadExtensions();
     } catch (err) {
       setError(`Uninstall failed: ${err.message}`);
     } finally {
@@ -723,7 +713,7 @@ const ExtensionsTab = () => {
   const handlePublish = async () => {
     setError(null);
     try {
-      const result = await api.publishExtension({
+      await api.publishExtension({
         name: publishForm.name,
         description: publishForm.description,
         version: publishForm.version,
@@ -731,35 +721,68 @@ const ExtensionsTab = () => {
         sourceHash: publishForm.sourceHash || "0x" + Array.from({length: 64}, () => Math.floor(Math.random()*16).toString(16)).join(""),
         tags: publishForm.tags.split(",").map(t => t.trim()).filter(Boolean),
       });
-      setExtensions(prev => [...prev, {
-        id: result.extensionId, name: publishForm.name, description: publishForm.description,
-        version: publishForm.version, category: publishForm.category, tags: publishForm.tags.split(",").map(t => t.trim()).filter(Boolean),
-        author: "you", installCount: 0, isAudited: false, installed: false, isInstalled: false, enabled: false,
-      }]);
       setShowPublish(false);
       setPublishForm({ name: "", description: "", version: "1.0.0", category: 0, sourceHash: "", tags: "" });
+      await loadExtensions();
     } catch (err) {
       setError(`Publish failed: ${err.message}`);
     }
   };
 
   const categoryLabels = { 0: "tool", 1: "hook", 2: "composite", 3: "channel" };
-
-  const filtered = extensions.filter(e => {
-    const isInstalled = e.installed || e.isInstalled;
-    const cat = typeof e.category === "number" ? (categoryLabels[e.category] || "tool") : e.category;
-    if (filter === "installed" && !isInstalled) return false;
-    if (filter !== "all" && filter !== "installed" && cat !== filter) return false;
-    if (search && !e.name?.includes(search) && !e.description?.toLowerCase().includes(search.toLowerCase())) return false;
-    return true;
+  const activeList = view === "installed" ? installed : marketplace;
+  const filtered = activeList.filter(e => {
+    if (!search) return true;
+    return e.name?.toLowerCase().includes(search.toLowerCase()) || e.description?.toLowerCase().includes(search.toLowerCase());
   });
+
+  const ExtensionCard = ({ ext }) => {
+    const isInstalled = ext.installed || ext.isInstalled;
+    const cat = typeof ext.category === "number" ? (categoryLabels[ext.category] || "tool") : ext.category;
+    return (
+      <div className={`bg-zinc-900 rounded-xl border p-4 transition ${isInstalled ? "border-emerald-800/50" : "border-zinc-800"}`}>
+        <div className="flex items-start justify-between mb-2">
+          <div className="flex items-center gap-2">
+            <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${isInstalled ? "bg-emerald-900/50 text-emerald-400" : "bg-zinc-800 text-zinc-500"}`}>
+              <CategoryIcon category={cat} />
+            </div>
+            <div>
+              <div className="text-sm font-medium text-zinc-200">{ext.name}</div>
+              <div className="text-xs text-zinc-600">v{ext.version} {ext.author ? `by ${ext.author.slice(0,8)}...` : ""}</div>
+            </div>
+          </div>
+          {ext.isAudited && <Badge variant="success">Audited</Badge>}
+        </div>
+        <p className="text-xs text-zinc-400 mb-3 leading-relaxed">{ext.description}</p>
+        <div className="flex items-center gap-2 mb-3 flex-wrap">
+          {(ext.tags || []).map(t => <Badge key={t}>{t}</Badge>)}
+        </div>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3 text-xs text-zinc-600">
+            {ext.installCount !== undefined && <span className="flex items-center gap-1"><Download size={10} /> {ext.installCount}</span>}
+            <Badge variant={cat === "tool" ? "info" : cat === "hook" ? "purple" : "cyan"}>{cat}</Badge>
+          </div>
+          <button
+            onClick={() => isInstalled ? handleUninstall(ext.id) : handleInstall(ext.id)}
+            disabled={actionLoading === ext.id}
+            className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
+              isInstalled
+                ? "bg-zinc-800 text-zinc-400 hover:bg-red-900/30 hover:text-red-400"
+                : "bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600/30 border border-emerald-800/50"
+            } disabled:opacity-50`}>
+            {actionLoading === ext.id ? <Loader2 size={12} className="animate-spin" /> : isInstalled ? "Uninstall" : "Install"}
+          </button>
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div className="p-6 space-y-5 overflow-y-auto h-full">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-lg font-bold text-zinc-100">Extension Marketplace</h2>
-          <p className="text-xs text-zinc-500 mt-0.5">Permissionless on-chain extensions. Publish, install, uninstall.</p>
+          <h2 className="text-lg font-bold text-zinc-100">Extensions</h2>
+          <p className="text-xs text-zinc-500 mt-0.5">On-chain extensions auto-detected from your wallet and the global registry.</p>
         </div>
         <button onClick={() => setShowPublish(!showPublish)} className="flex items-center gap-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-medium transition">
           <Upload size={14} /> Publish
@@ -784,6 +807,7 @@ const ExtensionsTab = () => {
           <div className="grid grid-cols-2 gap-3">
             <select value={publishForm.category} onChange={e => setPublishForm(p => ({...p, category: parseInt(e.target.value)}))} className="bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 outline-none">
               <option value={0}>Tool</option><option value={1}>Hook</option><option value={2}>Composite</option><option value={3}>Channel</option>
+              <option value={4}>Memory Backend</option><option value={5}>Scheduler</option><option value={6}>Behavior</option><option value={7}>Integration</option>
             </select>
             <input type="text" placeholder="Tags (comma separated)" value={publishForm.tags} onChange={e => setPublishForm(p => ({...p, tags: e.target.value}))} className="bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 outline-none" />
           </div>
@@ -794,66 +818,47 @@ const ExtensionsTab = () => {
         </div>
       )}
 
+      {/* Installed / Marketplace toggle */}
       <div className="flex items-center gap-3">
+        <div className="flex gap-1 bg-zinc-900 border border-zinc-800 rounded-lg p-1">
+          <button onClick={() => setView("installed")}
+            className={`px-4 py-1.5 text-xs rounded-md transition ${view === "installed" ? "bg-zinc-700 text-zinc-100" : "text-zinc-500 hover:text-zinc-300"}`}>
+            Installed ({installed.length})
+          </button>
+          <button onClick={() => setView("marketplace")}
+            className={`px-4 py-1.5 text-xs rounded-md transition ${view === "marketplace" ? "bg-zinc-700 text-zinc-100" : "text-zinc-500 hover:text-zinc-300"}`}>
+            Marketplace ({marketplace.length})
+          </button>
+        </div>
         <div className="flex-1 relative">
           <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-600" />
           <input type="text" value={search} onChange={e => setSearch(e.target.value)}
             placeholder="Search extensions..." className="w-full bg-zinc-900 border border-zinc-800 rounded-lg pl-9 pr-4 py-2 text-sm text-zinc-200 placeholder-zinc-600 outline-none focus:border-zinc-700" />
         </div>
-        <div className="flex gap-1 bg-zinc-900 border border-zinc-800 rounded-lg p-1">
-          {["all","installed","tool","hook","composite","channel"].map(f => (
-            <button key={f} onClick={() => setFilter(f)}
-              className={`px-3 py-1 text-xs rounded-md transition ${filter === f ? "bg-zinc-700 text-zinc-100" : "text-zinc-500 hover:text-zinc-300"}`}>
-              {f.charAt(0).toUpperCase() + f.slice(1)}
-            </button>
-          ))}
-        </div>
       </div>
 
       {loading ? (
         <div className="flex items-center gap-2 text-zinc-400"><Spinner /> Loading extensions...</div>
+      ) : filtered.length === 0 ? (
+        <div className="flex flex-col items-center justify-center py-16 text-center">
+          <Puzzle size={32} className="text-zinc-700 mb-3" />
+          {view === "installed" ? (
+            <>
+              <p className="text-sm text-zinc-400 mb-1">No extensions installed</p>
+              <p className="text-xs text-zinc-600">Browse the marketplace to add capabilities to your agent, or publish your own.</p>
+              <button onClick={() => setView("marketplace")} className="mt-3 text-xs text-teal-400 hover:text-teal-300 transition">Browse Marketplace</button>
+            </>
+          ) : (
+            <>
+              <p className="text-sm text-zinc-400 mb-1">No extensions in the marketplace yet</p>
+              <p className="text-xs text-zinc-600">Be the first to publish an on-chain extension for FlowClaw agents.</p>
+              <button onClick={() => setShowPublish(true)} className="mt-3 text-xs text-teal-400 hover:text-teal-300 transition">Publish an Extension</button>
+            </>
+          )}
+        </div>
       ) : (
         <div className="grid grid-cols-2 gap-4">
-          {filtered.map(ext => {
-            const isInstalled = ext.installed || ext.isInstalled;
-            const cat = typeof ext.category === "number" ? (categoryLabels[ext.category] || "tool") : ext.category;
-            return (
-              <div key={ext.id} className={`bg-zinc-900 rounded-xl border p-4 transition ${isInstalled ? "border-emerald-800/50" : "border-zinc-800"}`}>
-                <div className="flex items-start justify-between mb-2">
-                  <div className="flex items-center gap-2">
-                    <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${isInstalled ? "bg-emerald-900/50 text-emerald-400" : "bg-zinc-800 text-zinc-500"}`}>
-                      <CategoryIcon category={cat} />
-                    </div>
-                    <div>
-                      <div className="text-sm font-medium text-zinc-200">{ext.name}</div>
-                      <div className="text-xs text-zinc-600">v{ext.version} {ext.author ? `by ${ext.author.slice(0,8)}...` : ""}</div>
-                    </div>
-                  </div>
-                  {ext.isAudited && <Badge variant="success">Audited</Badge>}
-                </div>
-                <p className="text-xs text-zinc-400 mb-3 leading-relaxed">{ext.description}</p>
-                <div className="flex items-center gap-2 mb-3 flex-wrap">
-                  {(ext.tags || []).map(t => <Badge key={t}>{t}</Badge>)}
-                </div>
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3 text-xs text-zinc-600">
-                    {ext.installCount !== undefined && <span className="flex items-center gap-1"><Download size={10} /> {ext.installCount}</span>}
-                    <Badge variant={cat === "tool" ? "info" : cat === "hook" ? "purple" : "cyan"}>{cat}</Badge>
-                  </div>
-                  <button
-                    onClick={() => isInstalled ? handleUninstall(ext.id) : handleInstall(ext.id)}
-                    disabled={actionLoading === ext.id}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-medium transition ${
-                      isInstalled
-                        ? "bg-zinc-800 text-zinc-400 hover:bg-red-900/30 hover:text-red-400"
-                        : "bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600/30 border border-emerald-800/50"
-                    } disabled:opacity-50`}>
-                    {actionLoading === ext.id ? <Loader2 size={12} className="animate-spin" /> : isInstalled ? "Uninstall" : "Install"}
-                  </button>
-                </div>
-              </div>
-            );
-          })}
+          {filtered.map(ext => <ExtensionCard key={ext.id} ext={ext} />)}
         </div>
       )}
     </div>
@@ -1747,9 +1752,8 @@ function FlowClawDashboard() {
           setActiveAgentId(defaultAgent.id);
         }
       } catch (e) {
-        // Fallback to single default agent
-        setAgents([{ id: 1, name: "FlowClaw Agent", isActive: true, isDefault: true, isSubAgent: false }]);
-        if (!activeAgentId) setActiveAgentId(1);
+        // No agents available — user needs to create one
+        setAgents([]);
       }
     };
     fetchAgents();
@@ -2009,47 +2013,9 @@ function AppRouter() {
     );
   }
 
-  // For now, skip landing page if relay is connected (dev mode)
-  // In production: show LandingPage when !auth.isLoggedIn
-  // During alpha: always show dashboard so existing flow works
-  const [skipLanding, setSkipLanding] = useState(false);
-  const [relayUp, setRelayUp] = useState(null);
-
-  useEffect(() => {
-    // Check if relay is running — if so, skip landing and go straight to app
-    (async () => {
-      try {
-        const res = await fetch(`${window.location.hostname === 'localhost' ? 'http://localhost:8000' : 'https://web-production-9784a.up.railway.app'}/status`);
-        if (res.ok) {
-          setRelayUp(true);
-          setSkipLanding(true);
-        } else {
-          setRelayUp(false);
-        }
-      } catch {
-        setRelayUp(false);
-      }
-    })();
-  }, []);
-
-  // Show landing page if: not logged in via wallet AND relay isn't running
-  if (!auth.isLoggedIn && !skipLanding && relayUp === false) {
+  // Require authentication — no dashboard without an account
+  if (!auth.isLoggedIn) {
     return <LandingPage />;
-  }
-
-  // If relay check hasn't completed yet, show loading
-  if (relayUp === null) {
-    return (
-      <div className="h-screen w-full bg-zinc-950 flex items-center justify-center" style={{ fontFamily: "'Inter', system-ui, sans-serif" }}>
-        <div className="flex flex-col items-center gap-4">
-          <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-emerald-500 to-cyan-500 flex items-center justify-center">
-            <Cpu size={24} className="text-white" />
-          </div>
-          <Loader2 size={20} className="animate-spin text-zinc-400" />
-          <span className="text-xs text-zinc-500">Connecting to FlowClaw...</span>
-        </div>
-      </div>
-    );
   }
 
   return <FlowClawDashboard />;

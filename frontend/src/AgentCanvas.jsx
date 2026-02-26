@@ -477,7 +477,7 @@ const ChatSidebar = ({ selectedAgent, agents, onSendMessage, messages, isTyping,
         </div>
         <div className="flex items-center gap-3 mt-1.5 px-1 text-[10px] text-zinc-600">
           <span className="flex items-center gap-1"><Lock size={8} /> Encrypted</span>
-          <span className="flex items-center gap-1"><Zap size={8} /> Venice AI</span>
+          <span className="flex items-center gap-1"><Zap size={8} /> BYOK</span>
           <span className="flex items-center gap-1">@ to mention</span>
         </div>
       </div>
@@ -738,8 +738,7 @@ export default function AgentCanvas() {
           });
         }
       } catch (e) {
-        setAgents([{ id: 1, name: "FlowClaw Agent", isActive: true, isDefault: true, isSubAgent: false, description: "Primary AI agent on the Flow blockchain" }]);
-        if (!selectedAgentId) setSelectedAgentId(1);
+        setAgents([]);
       }
     };
     // Small delay on first poll to let session init finish
