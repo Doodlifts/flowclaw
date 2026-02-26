@@ -330,8 +330,8 @@ const ChatTab = () => {
             <Badge variant="info">Scheduled Outputs</Badge>
           ) : (
             <>
-              <Badge variant="info">Venice AI</Badge>
-              <Badge variant="success">claude-sonnet-4-6</Badge>
+              <Badge variant="info">LLM</Badge>
+              <Badge variant="success">BYOK</Badge>
             </>
           )}
         </div>
@@ -1404,6 +1404,276 @@ const MemoryTab = () => {
 };
 
 // ============================================================
+// SETTINGS TAB — LLM Provider Management (BYOK)
+// ============================================================
+
+const PROVIDER_PRESETS = {
+  venice:    { type: "openai-compatible", base_url: "https://api.venice.ai/api/v1", hint: "Get key at venice.ai" },
+  openai:    { type: "openai-compatible", base_url: "https://api.openai.com/v1", hint: "Get key at platform.openai.com" },
+  anthropic: { type: "anthropic",         base_url: "https://api.anthropic.com", hint: "Get key at console.anthropic.com" },
+  openrouter:{ type: "openai-compatible", base_url: "https://openrouter.ai/api/v1", hint: "Get key at openrouter.ai" },
+  together:  { type: "openai-compatible", base_url: "https://api.together.xyz/v1", hint: "Get key at together.ai" },
+  groq:      { type: "openai-compatible", base_url: "https://api.groq.com/openai/v1", hint: "Get key at console.groq.com" },
+  ollama:    { type: "ollama",            base_url: "http://localhost:11434", hint: "Local models — no API key needed" },
+  custom:    { type: "openai-compatible", base_url: "",  hint: "Any OpenAI-compatible endpoint" },
+};
+
+const SettingsTab = () => {
+  const auth = useAuth();
+  const [providers, setProviders] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [showAddForm, setShowAddForm] = useState(false);
+  const [error, setError] = useState("");
+  const [success, setSuccess] = useState("");
+
+  // Add form state
+  const [formPreset, setFormPreset] = useState("venice");
+  const [formName, setFormName] = useState("venice");
+  const [formType, setFormType] = useState("openai-compatible");
+  const [formApiKey, setFormApiKey] = useState("");
+  const [formBaseUrl, setFormBaseUrl] = useState("https://api.venice.ai/api/v1");
+  const [formDefault, setFormDefault] = useState(false);
+  const [showKey, setShowKey] = useState(false);
+
+  const loadProviders = async () => {
+    try {
+      const data = await api.getProviders();
+      setProviders(data.providers || []);
+    } catch (e) {
+      console.warn("Failed to load providers:", e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => { loadProviders(); }, []);
+
+  const handlePresetChange = (preset) => {
+    setFormPreset(preset);
+    const p = PROVIDER_PRESETS[preset];
+    if (p) {
+      setFormName(preset);
+      setFormType(p.type);
+      setFormBaseUrl(p.base_url);
+      if (preset === "ollama") setFormApiKey("");
+    }
+  };
+
+  const handleSave = async () => {
+    if (!formName.trim()) { setError("Provider name is required"); return; }
+    if (formType !== "ollama" && !formApiKey.trim()) { setError("API key is required"); return; }
+    setSaving(true);
+    setError("");
+    try {
+      await api.saveProvider({
+        name: formName.trim(),
+        type: formType,
+        api_key: formApiKey.trim(),
+        base_url: formBaseUrl.trim(),
+        is_default: formDefault || providers.length === 0,
+      });
+      setSuccess(`Provider "${formName}" saved`);
+      setShowAddForm(false);
+      setFormApiKey("");
+      await loadProviders();
+      setTimeout(() => setSuccess(""), 3000);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleDelete = async (name) => {
+    try {
+      await api.deleteProvider(name);
+      await loadProviders();
+      setSuccess(`Provider "${name}" removed`);
+      setTimeout(() => setSuccess(""), 3000);
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  const handleSetDefault = async (name) => {
+    try {
+      await api.setDefaultProvider(name);
+      await loadProviders();
+    } catch (e) {
+      setError(e.message);
+    }
+  };
+
+  return (
+    <div className="p-4 space-y-6 max-w-2xl mx-auto">
+      {/* Account Info */}
+      <div className="bg-zinc-900 rounded-lg border border-zinc-800 p-4">
+        <h3 className="text-sm font-medium text-zinc-300 mb-3 flex items-center gap-2"><Shield size={14} /> Account</h3>
+        <div className="space-y-2 text-sm">
+          <div className="flex justify-between">
+            <span className="text-zinc-500">Address</span>
+            <span className="text-zinc-200 font-mono text-xs">{auth?.address || "—"}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-zinc-500">Auth Method</span>
+            <span className="text-zinc-200">{auth?.authMethod || "passkey"}</span>
+          </div>
+          <div className="flex justify-between">
+            <span className="text-zinc-500">Network</span>
+            <span className="text-teal-400">{NETWORK || "testnet"}</span>
+          </div>
+        </div>
+      </div>
+
+      {/* LLM Providers */}
+      <div className="bg-zinc-900 rounded-lg border border-zinc-800 p-4">
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-sm font-medium text-zinc-300 flex items-center gap-2"><Cpu size={14} /> LLM Providers</h3>
+          <button
+            onClick={() => { setShowAddForm(!showAddForm); setError(""); }}
+            className="text-xs px-3 py-1 bg-teal-600 hover:bg-teal-500 rounded-md transition-colors flex items-center gap-1"
+          >
+            <Plus size={12} /> Add Provider
+          </button>
+        </div>
+
+        {error && <div className="text-red-400 text-xs bg-red-900/20 rounded p-2 mb-3">{error}</div>}
+        {success && <div className="text-teal-400 text-xs bg-teal-900/20 rounded p-2 mb-3">{success}</div>}
+
+        {/* Configured Providers List */}
+        {loading ? (
+          <div className="text-zinc-500 text-sm py-4 text-center"><Loader2 size={14} className="animate-spin inline mr-2" />Loading...</div>
+        ) : providers.length === 0 ? (
+          <div className="text-zinc-500 text-sm py-4 text-center border border-dashed border-zinc-700 rounded-lg">
+            No LLM providers configured. Add one to start chatting with your agent.
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {providers.map((p) => (
+              <div key={p.name} className="flex items-center justify-between bg-zinc-800/50 rounded-lg p-3 group">
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-zinc-200">{p.name}</span>
+                    {p.is_default && <span className="text-[10px] px-1.5 py-0.5 bg-teal-600/30 text-teal-400 rounded">default</span>}
+                    <span className="text-[10px] px-1.5 py-0.5 bg-zinc-700 text-zinc-400 rounded">{p.type}</span>
+                  </div>
+                  <div className="text-xs text-zinc-500 mt-0.5 font-mono">{p.api_key}</div>
+                </div>
+                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                  {!p.is_default && (
+                    <button onClick={() => handleSetDefault(p.name)} className="text-xs px-2 py-1 text-teal-400 hover:bg-teal-600/20 rounded" title="Set as default">
+                      <Star size={12} />
+                    </button>
+                  )}
+                  <button onClick={() => handleDelete(p.name)} className="text-xs px-2 py-1 text-red-400 hover:bg-red-600/20 rounded" title="Remove">
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Add Provider Form */}
+        {showAddForm && (
+          <div className="mt-4 bg-zinc-800/50 rounded-lg p-4 border border-zinc-700 space-y-3">
+            <div>
+              <label className="text-xs text-zinc-400 block mb-1">Provider Preset</label>
+              <div className="flex flex-wrap gap-1.5">
+                {Object.entries(PROVIDER_PRESETS).map(([key, val]) => (
+                  <button
+                    key={key}
+                    onClick={() => handlePresetChange(key)}
+                    className={`text-xs px-2.5 py-1 rounded-md border transition-colors ${
+                      formPreset === key
+                        ? "border-teal-500 bg-teal-600/20 text-teal-300"
+                        : "border-zinc-700 bg-zinc-800 text-zinc-400 hover:border-zinc-600"
+                    }`}
+                  >
+                    {key}
+                  </button>
+                ))}
+              </div>
+              {PROVIDER_PRESETS[formPreset]?.hint && (
+                <p className="text-[10px] text-zinc-500 mt-1">{PROVIDER_PRESETS[formPreset].hint}</p>
+              )}
+            </div>
+
+            <div>
+              <label className="text-xs text-zinc-400 block mb-1">Name</label>
+              <input
+                value={formName}
+                onChange={e => setFormName(e.target.value)}
+                className="w-full bg-zinc-900 border border-zinc-700 rounded px-3 py-1.5 text-sm text-zinc-200 focus:border-teal-500 outline-none"
+                placeholder="e.g. my-venice"
+              />
+            </div>
+
+            {formType !== "ollama" && (
+              <div>
+                <label className="text-xs text-zinc-400 block mb-1">API Key</label>
+                <div className="relative">
+                  <input
+                    type={showKey ? "text" : "password"}
+                    value={formApiKey}
+                    onChange={e => setFormApiKey(e.target.value)}
+                    className="w-full bg-zinc-900 border border-zinc-700 rounded px-3 py-1.5 text-sm text-zinc-200 focus:border-teal-500 outline-none pr-8"
+                    placeholder="sk-..."
+                  />
+                  <button onClick={() => setShowKey(!showKey)} className="absolute right-2 top-1.5 text-zinc-500 hover:text-zinc-300">
+                    {showKey ? <EyeOff size={14} /> : <Eye size={14} />}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <div>
+              <label className="text-xs text-zinc-400 block mb-1">Base URL</label>
+              <input
+                value={formBaseUrl}
+                onChange={e => setFormBaseUrl(e.target.value)}
+                className="w-full bg-zinc-900 border border-zinc-700 rounded px-3 py-1.5 text-sm text-zinc-200 focus:border-teal-500 outline-none"
+                placeholder="https://api.openai.com/v1"
+              />
+            </div>
+
+            <div className="flex items-center gap-2">
+              <input type="checkbox" id="is-default" checked={formDefault} onChange={e => setFormDefault(e.target.checked)} className="accent-teal-500" />
+              <label htmlFor="is-default" className="text-xs text-zinc-400">Set as default provider</label>
+            </div>
+
+            <div className="flex gap-2 pt-1">
+              <button
+                onClick={handleSave}
+                disabled={saving}
+                className="flex-1 text-sm px-4 py-2 bg-teal-600 hover:bg-teal-500 disabled:opacity-50 rounded-md transition-colors flex items-center justify-center gap-2"
+              >
+                {saving ? <Loader2 size={14} className="animate-spin" /> : <CheckCircle size={14} />}
+                {saving ? "Saving..." : "Save Provider"}
+              </button>
+              <button
+                onClick={() => { setShowAddForm(false); setError(""); }}
+                className="px-4 py-2 text-sm text-zinc-400 hover:text-zinc-200 border border-zinc-700 rounded-md transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Info */}
+      <p className="text-xs text-zinc-500">
+        Your API keys are stored on the relay server for your session. Each agent can use a different provider.
+        Supports any OpenAI-compatible endpoint (Venice, OpenRouter, Together, Groq) plus Anthropic and local Ollama models.
+      </p>
+    </div>
+  );
+};
+
+
+// ============================================================
 // MAIN APP — with auth, landing page, onboarding
 // ============================================================
 const TABS = [
@@ -1413,6 +1683,7 @@ const TABS = [
   { id: "extensions", label: "Extensions", icon: Puzzle },
   { id: "scheduler", label: "Scheduler", icon: Clock },
   { id: "memory", label: "Memory", icon: Brain },
+  { id: "settings", label: "Settings", icon: Settings },
 ];
 
 function FlowClawDashboard() {
@@ -1432,6 +1703,8 @@ function FlowClawDashboard() {
   const [newAgentName, setNewAgentName] = useState("");
   const [newAgentDesc, setNewAgentDesc] = useState("");
   const [newAgentPrompt, setNewAgentPrompt] = useState("");
+  const [newAgentProvider, setNewAgentProvider] = useState("");
+  const [newAgentModel, setNewAgentModel] = useState("");
 
   // Check if first visit
   useEffect(() => {
@@ -1452,7 +1725,7 @@ function FlowClawDashboard() {
       try {
         const status = await api.getStatus();
         setRelayConnected(status.connected);
-        setAccountAddress(status.accountAddress || auth.address || "");
+        setAccountAddress(auth.address || "");
         setNetworkName(status.network || "");
       } catch {
         setRelayConnected(false);
@@ -1491,6 +1764,8 @@ function FlowClawDashboard() {
         name: newAgentName.trim(),
         description: newAgentDesc.trim(),
         systemPrompt: newAgentPrompt.trim(),
+        provider: newAgentProvider.trim() || undefined,
+        model: newAgentModel.trim() || undefined,
       });
       if (result.agentId) {
         setActiveAgentId(result.agentId);
@@ -1502,6 +1777,8 @@ function FlowClawDashboard() {
       setNewAgentName("");
       setNewAgentDesc("");
       setNewAgentPrompt("");
+      setNewAgentProvider("");
+      setNewAgentModel("");
     } catch (e) {
       console.error("Failed to create agent:", e);
     }
@@ -1525,7 +1802,7 @@ function FlowClawDashboard() {
     return () => document.removeEventListener('click', handler);
   }, [showAgentMenu]);
 
-  const TabContent = { canvas: AgentCanvas, chat: ChatTab, dashboard: DashboardTab, extensions: ExtensionsTab, scheduler: SchedulerTab, memory: MemoryTab };
+  const TabContent = { canvas: AgentCanvas, chat: ChatTab, dashboard: DashboardTab, extensions: ExtensionsTab, scheduler: SchedulerTab, memory: MemoryTab, settings: SettingsTab };
   const Active = TabContent[activeTab];
 
   return (
@@ -1562,6 +1839,21 @@ function FlowClawDashboard() {
                   rows={3}
                   className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:border-emerald-500 focus:outline-none resize-none" />
               </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-xs text-zinc-500 mb-1 block">Provider</label>
+                  <input value={newAgentProvider} onChange={e => setNewAgentProvider(e.target.value)}
+                    placeholder="e.g. venice, openai"
+                    className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:border-emerald-500 focus:outline-none" />
+                </div>
+                <div>
+                  <label className="text-xs text-zinc-500 mb-1 block">Model</label>
+                  <input value={newAgentModel} onChange={e => setNewAgentModel(e.target.value)}
+                    placeholder="e.g. gpt-4o, claude-sonnet-4-6"
+                    className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-sm text-zinc-200 placeholder-zinc-600 focus:border-emerald-500 focus:outline-none" />
+                </div>
+              </div>
+              <p className="text-[10px] text-zinc-600">Leave blank to use your default provider from Settings.</p>
               <div className="flex gap-2 pt-2">
                 <button onClick={() => setShowCreateAgent(false)}
                   className="flex-1 px-4 py-2 bg-zinc-800 text-zinc-400 rounded-lg text-xs hover:bg-zinc-700 transition">

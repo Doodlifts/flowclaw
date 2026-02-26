@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -136,6 +136,78 @@ _next_hook_id: int = 1
 _next_extension_id: int = 1
 _next_execution_id: int = 1
 
+# Per-user provider storage: address -> list of provider configs
+# Each config: { name, type, api_key, base_url, is_default }
+user_providers: Dict[str, List[Dict]] = {}
+# Cached per-user LLM provider instances: address -> { provider_name -> LLMProvider }
+_user_provider_cache: Dict[str, Dict[str, LLMProvider]] = {}
+
+
+def _get_authed_address(request: Request) -> str:
+    """Extract and verify the session token from Authorization header.
+    Returns the user's Flow address or raises 401."""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+    token = auth[7:]
+    if not account_manager:
+        raise HTTPException(status_code=503, detail="Account manager not initialized")
+    data = account_manager.verify_token(token)
+    if not data:
+        raise HTTPException(status_code=401, detail="Invalid or expired session token")
+    return data["address"]
+
+
+def _get_user_provider(address: str, provider_name: str = None) -> Optional[LLMProvider]:
+    """Get an LLM provider instance for a user. Creates on-demand from stored config.
+    Falls back to global providers if user has none configured."""
+    user_configs = user_providers.get(address, [])
+
+    if not user_configs:
+        # No user providers — fall back to global
+        if provider_name and provider_name in providers:
+            return providers[provider_name]
+        if providers:
+            return list(providers.values())[0]
+        return None
+
+    # Find the requested or default provider
+    target_config = None
+    if provider_name:
+        target_config = next((c for c in user_configs if c["name"] == provider_name), None)
+    if not target_config:
+        target_config = next((c for c in user_configs if c.get("is_default")), None)
+    if not target_config and user_configs:
+        target_config = user_configs[0]
+    if not target_config:
+        return None
+
+    # Check cache
+    cache_key = f"{target_config['name']}_{target_config.get('api_key', '')[:8]}"
+    if address in _user_provider_cache and cache_key in _user_provider_cache[address]:
+        return _user_provider_cache[address][cache_key]
+
+    # Instantiate provider
+    ptype = target_config.get("type", "openai-compatible")
+    api_key = target_config.get("api_key", "")
+    base_url = target_config.get("base_url", "")
+
+    instance = None
+    if ptype == "anthropic":
+        instance = AnthropicProvider(api_key)
+    elif ptype == "ollama":
+        instance = OllamaProvider(base_url or "http://localhost:11434")
+    else:
+        # openai-compatible (covers Venice, OpenAI, OpenRouter, Together, etc.)
+        instance = VeniceProvider(api_key, base_url or "https://api.openai.com/v1")
+
+    # Cache it
+    if address not in _user_provider_cache:
+        _user_provider_cache[address] = {}
+    _user_provider_cache[address][cache_key] = instance
+
+    return instance
+
 
 # -----------------------------------------------------------------------
 # Request/Response Models
@@ -144,8 +216,8 @@ _next_execution_id: int = 1
 class SendMessageRequest(BaseModel):
     sessionId: int
     content: str
-    provider: str = "venice"
-    model: str = "claude-sonnet-4-6"
+    provider: str = ""  # empty = use user's default provider
+    model: str = ""     # empty = use provider's default model
 
 class CreateSessionRequest(BaseModel):
     maxContextMessages: int = 4096
@@ -216,8 +288,8 @@ class CreateAgentRequest(BaseModel):
     name: str
     description: str
     systemPrompt: str = ""
-    provider: str = "venice"
-    model: str = "claude-sonnet-4-6"
+    provider: str = ""  # empty = use user's default
+    model: str = ""     # empty = use provider's default
     autonomyLevel: int = 1
     maxActionsPerHour: int = 100
     maxCostPerDay: float = 5.0
@@ -232,6 +304,19 @@ class SpawnSubAgentRequest(BaseModel):
 
 class InstallExtensionRequest(BaseModel):
     config: Dict[str, str] = {}
+
+
+class SaveProviderRequest(BaseModel):
+    name: str  # user-facing name, e.g. "My Venice", "OpenRouter GPT-4"
+    type: str = "openai-compatible"  # "openai-compatible", "anthropic", "ollama"
+    api_key: str = ""
+    base_url: str = ""
+    is_default: bool = False
+
+
+class SetDefaultProviderRequest(BaseModel):
+    provider_name: str
+    model: str = ""
 
 
 class MemoryStoreResponse(BaseModel):
@@ -1078,11 +1163,11 @@ async def get_status():
 
     return {
         "connected": emulator_ok,
-        "accountAddress": config.flow_account_address,
         "network": config.flow_network,
         "encryptionEnabled": encryption.is_configured if encryption else False,
         "availableProviders": list(providers.keys()),
         "uptime": round(time.time() - start_time, 1),
+        "byokEnabled": True,
     }
 
 
@@ -1417,17 +1502,27 @@ def _parse_and_store_memories(response_content: str) -> str:
 
 
 @app.post("/chat/send")
-async def send_message(req: SendMessageRequest):
+async def send_message(req: SendMessageRequest, request: Request):
     """
     Send a message and get an LLM response (synchronous).
 
     Flow:
     1. Send message on-chain (transaction)
-    2. Call LLM provider (Venice AI)
+    2. Call LLM provider (user's BYOK or relay fallback)
     3. Post response on-chain (transaction)
     4. Return plaintext response to frontend
     """
-    provider = providers.get(req.provider)
+    # Try to get user-specific provider first (BYOK)
+    provider = None
+    try:
+        address = _get_authed_address(request)
+        provider = _get_user_provider(address, req.provider)
+    except HTTPException:
+        pass  # No auth token — fall back to global providers
+
+    # Fall back to global providers
+    if not provider:
+        provider = providers.get(req.provider)
     if not provider:
         available = list(providers.keys())
         if available:
@@ -1437,7 +1532,7 @@ async def send_message(req: SendMessageRequest):
         else:
             raise HTTPException(
                 status_code=503,
-                detail="No LLM providers configured. Set VENICE_API_KEY in .env"
+                detail="No LLM providers configured. Add a provider in Settings or set VENICE_API_KEY in .env"
             )
 
     # Auto-resolve session ID: ensure we have a valid on-chain session
@@ -1927,22 +2022,31 @@ async def verify_passkey(req: VerifyPasskeyRequest):
 
 
 @app.get("/account/status")
-async def get_account_status():
+async def get_account_status(request: Request):
     """Get account status including auth method and custody type."""
-    # Check for Bearer token
-    # For PoC, return status based on current relay config
-    address = config.flow_account_address if config else ""
+    # Try to get address from auth token first
+    try:
+        address = _get_authed_address(request)
+    except HTTPException:
+        # No valid token — return unauthenticated status
+        return {
+            "address": "",
+            "authMethod": "none",
+            "custodyType": "standalone",
+            "authenticated": False,
+        }
 
     if account_manager:
         status = account_manager.get_account_status(address)
         if status:
+            status["authenticated"] = True
             return status
 
     return {
         "address": address,
-        "authMethod": "relay",
+        "authMethod": "passkey",
         "custodyType": "standalone",
-        "agentCount": len(agents_cache) or 1,
+        "authenticated": True,
     }
 
 
@@ -1992,6 +2096,110 @@ async def get_gas_usage():
 
     address = config.flow_account_address if config else ""
     return gas_sponsor.get_account_usage(address)
+
+
+# -----------------------------------------------------------------------
+# User LLM Provider Endpoints (BYOK)
+# -----------------------------------------------------------------------
+
+KNOWN_PROVIDER_PRESETS = {
+    "venice": {"type": "openai-compatible", "base_url": "https://api.venice.ai/api/v1"},
+    "openai": {"type": "openai-compatible", "base_url": "https://api.openai.com/v1"},
+    "anthropic": {"type": "anthropic", "base_url": "https://api.anthropic.com"},
+    "openrouter": {"type": "openai-compatible", "base_url": "https://openrouter.ai/api/v1"},
+    "together": {"type": "openai-compatible", "base_url": "https://api.together.xyz/v1"},
+    "groq": {"type": "openai-compatible", "base_url": "https://api.groq.com/openai/v1"},
+    "ollama": {"type": "ollama", "base_url": "http://localhost:11434"},
+}
+
+
+@app.get("/account/providers")
+async def get_user_providers(request: Request):
+    """List the authenticated user's configured LLM providers (keys masked)."""
+    address = _get_authed_address(request)
+    configs = user_providers.get(address, [])
+    # Mask API keys in response
+    masked = []
+    for c in configs:
+        entry = {**c}
+        key = entry.get("api_key", "")
+        entry["api_key"] = f"{key[:8]}...{key[-4:]}" if len(key) > 12 else "***"
+        masked.append(entry)
+    return {"providers": masked, "presets": list(KNOWN_PROVIDER_PRESETS.keys())}
+
+
+@app.post("/account/providers")
+async def save_user_provider(req: SaveProviderRequest, request: Request):
+    """Save or update an LLM provider configuration for the authenticated user."""
+    address = _get_authed_address(request)
+
+    if address not in user_providers:
+        user_providers[address] = []
+
+    # Update existing or add new
+    existing = next((c for c in user_providers[address] if c["name"] == req.name), None)
+    if existing:
+        existing["type"] = req.type
+        existing["api_key"] = req.api_key
+        existing["base_url"] = req.base_url
+        if req.is_default:
+            for c in user_providers[address]:
+                c["is_default"] = False
+            existing["is_default"] = True
+    else:
+        new_config = {
+            "name": req.name,
+            "type": req.type,
+            "api_key": req.api_key,
+            "base_url": req.base_url,
+            "is_default": req.is_default or len(user_providers[address]) == 0,
+        }
+        # If this is the first provider, make it default
+        if not user_providers[address]:
+            new_config["is_default"] = True
+        user_providers[address].append(new_config)
+
+    # Clear cached provider instances for this user
+    _user_provider_cache.pop(address, None)
+
+    logging.info(f"Provider saved for {address}: {req.name} ({req.type})")
+    return {"success": True, "name": req.name}
+
+
+@app.delete("/account/providers/{provider_name}")
+async def delete_user_provider(provider_name: str, request: Request):
+    """Remove an LLM provider configuration for the authenticated user."""
+    address = _get_authed_address(request)
+    configs = user_providers.get(address, [])
+    user_providers[address] = [c for c in configs if c["name"] != provider_name]
+    _user_provider_cache.pop(address, None)
+    logging.info(f"Provider deleted for {address}: {provider_name}")
+    return {"success": True}
+
+
+@app.put("/account/default-provider")
+async def set_default_provider(req: SetDefaultProviderRequest, request: Request):
+    """Set the default LLM provider and model for the authenticated user."""
+    address = _get_authed_address(request)
+    configs = user_providers.get(address, [])
+    found = False
+    for c in configs:
+        if c["name"] == req.provider_name:
+            c["is_default"] = True
+            if req.model:
+                c["default_model"] = req.model
+            found = True
+        else:
+            c["is_default"] = False
+    if not found:
+        raise HTTPException(status_code=404, detail=f"Provider '{req.provider_name}' not found")
+    return {"success": True}
+
+
+@app.get("/account/provider-presets")
+async def get_provider_presets():
+    """Get known provider presets with their default base URLs."""
+    return {"presets": KNOWN_PROVIDER_PRESETS}
 
 
 # -----------------------------------------------------------------------

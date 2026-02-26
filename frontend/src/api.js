@@ -5,6 +5,13 @@ const API_BASE = window.location.hostname === 'localhost'
   ? 'http://localhost:8000'
   : 'https://web-production-9784a.up.railway.app';
 
+function getAuthHeaders() {
+  const token = localStorage.getItem('flowclaw_session_token');
+  const headers = { 'Content-Type': 'application/json' };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  return headers;
+}
+
 async function handleResponse(res) {
   if (!res.ok) {
     const text = await res.text();
@@ -21,10 +28,10 @@ export const api = {
   },
 
   // Chat
-  async sendMessage(sessionId, content, provider = 'venice', model = 'claude-sonnet-4-6') {
+  async sendMessage(sessionId, content, provider = '', model = '') {
     const res = await fetch(`${API_BASE}/chat/send`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body: JSON.stringify({ sessionId, content, provider, model }),
     });
     return handleResponse(res);
@@ -197,6 +204,46 @@ export const api = {
   // Automated session (task execution outputs)
   async getAutomatedMessages() {
     const res = await fetch(`${API_BASE}/session/-1/messages`);
+    return handleResponse(res);
+  },
+
+  // ----- LLM Provider Management (BYOK) -----
+
+  async getProviders() {
+    const res = await fetch(`${API_BASE}/account/providers`, {
+      headers: getAuthHeaders(),
+    });
+    return handleResponse(res);
+  },
+
+  async saveProvider({ name, type, api_key, base_url, is_default }) {
+    const res = await fetch(`${API_BASE}/account/providers`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ name, type, api_key, base_url, is_default }),
+    });
+    return handleResponse(res);
+  },
+
+  async deleteProvider(providerName) {
+    const res = await fetch(`${API_BASE}/account/providers/${encodeURIComponent(providerName)}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
+    return handleResponse(res);
+  },
+
+  async setDefaultProvider(providerName, model = '') {
+    const res = await fetch(`${API_BASE}/account/default-provider`, {
+      method: 'PUT',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ provider_name: providerName, model }),
+    });
+    return handleResponse(res);
+  },
+
+  async getProviderPresets() {
+    const res = await fetch(`${API_BASE}/account/provider-presets`);
     return handleResponse(res);
   },
 };
