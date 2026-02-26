@@ -1,7 +1,9 @@
 // FlowClaw API Client
 // Connects to the relay API server
 
-const API_BASE = import.meta.env.VITE_RELAY_URL || 'http://localhost:8000';
+const API_BASE = window.location.hostname === 'localhost'
+  ? 'http://localhost:8000'
+  : 'https://web-production-9784a.up.railway.app';
 
 async function handleResponse(res) {
   if (!res.ok) {
