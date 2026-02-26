@@ -38,12 +38,13 @@ RUN chown -R flowuser:flowuser /app
 # Switch to non-root user
 USER flowuser
 
-# Expose port (Railway sets $PORT dynamically)
+# Default port
+ENV PORT=8000
 EXPOSE 8000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:${PORT:-8000}/status || exit 1
+    CMD curl -f http://localhost:8000/status || exit 1
 
-# Run the application — use shell form so $PORT is expanded
-CMD uvicorn relay.api:app --host 0.0.0.0 --port ${PORT:-8000}
+# Run via shell script so $PORT is properly expanded
+CMD ["/bin/sh", "-c", "uvicorn relay.api:app --host 0.0.0.0 --port $PORT"]
