@@ -1,7 +1,7 @@
 // FlowClaw API Client
-// Connects to the relay API server at localhost:8000
+// Connects to the relay API server
 
-const API_BASE = 'http://localhost:8000';
+const API_BASE = import.meta.env.VITE_RELAY_URL || 'http://localhost:8000';
 
 async function handleResponse(res) {
   if (!res.ok) {
