@@ -1727,7 +1727,7 @@ function AppRouter() {
     // Check if relay is running — if so, skip landing and go straight to app
     (async () => {
       try {
-        const res = await fetch("http://localhost:8000/status");
+        const res = await fetch(`${window.location.hostname === 'localhost' ? 'http://localhost:8000' : 'https://web-production-9784a.up.railway.app'}/status`);
         if (res.ok) {
           setRelayUp(true);
           setSkipLanding(true);

@@ -7,7 +7,9 @@ import { fcl } from "./flow-config";
 
 const AuthContext = createContext(null);
 
-const API_BASE = "http://localhost:8000";
+const API_BASE = window.location.hostname === 'localhost'
+  ? 'http://localhost:8000'
+  : 'https://web-production-9784a.up.railway.app';
 
 // -----------------------------------------------------------------------
 // WebAuthn / Passkey Helpers
