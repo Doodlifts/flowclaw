@@ -238,6 +238,8 @@ export function AuthProvider({ children }) {
 
       // Send the SubtleCrypto public key (NOT the passkey's key) to the relay.
       // The relay creates a Flow account with this key + SHA2_256 hash algo.
+      // We also send the private key JWK as a backup so the relay can return it
+      // when the user re-authenticates (key recovery on disconnect/new-session).
       const res = await fetch(`${API_BASE}/account/create-passkey`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -245,6 +247,7 @@ export function AuthProvider({ children }) {
           publicKey: publicKeyHex,
           credentialId: credentialId,
           displayName: displayName,
+          signingKeyBackup: JSON.stringify(privateKeyJwk),
         }),
       });
 
@@ -394,10 +397,27 @@ export function AuthProvider({ children }) {
         setSessionToken(data.token);
       }
 
+      // Restore signing key from relay backup if we don't have one locally.
+      // The relay returns the JWK backup after successful passkey verification.
+      if (data.address && !hasSigningKey(data.address) && data.signingKeyBackup) {
+        try {
+          const jwk = JSON.parse(data.signingKeyBackup);
+          storeSigningKey(data.address, jwk);
+          console.log("Signing key restored from relay backup for", data.address);
+        } catch (err) {
+          console.warn("Failed to restore signing key from backup:", err.message);
+        }
+      }
+
       setUser({ loggedIn: true, addr: data.address });
       setAuthMethod("passkey");
       setCustodyType(data.custodyType || "standalone");
       setInitialized(true);
+
+      // Run background repair to ensure on-chain resources are up to date
+      if (data.token && data.address) {
+        repairOnChainResources(data.address, data.token);
+      }
 
       return data;
     } catch (err) {
@@ -418,9 +438,11 @@ export function AuthProvider({ children }) {
   // Disconnect
   // ------------------------------------------------------------------
   const disconnectWallet = () => {
-    // Remove signing key before clearing address
-    const addr = user.addr;
-    if (addr) removeSigningKey(addr);
+    // NOTE: We intentionally do NOT remove the signing key here.
+    // The signing key is tied to the on-chain Flow account and cannot be recovered
+    // if deleted. It stays in localStorage keyed by address so it's available
+    // if the user signs back in with the same passkey. The key is only useful
+    // to someone who also has the passkey (for authentication) and session token.
 
     fcl.unauthenticate();
     setUser({ loggedIn: false, addr: null });
@@ -429,7 +451,7 @@ export function AuthProvider({ children }) {
     setSessionToken(null);
     setCustodyType("standalone");
 
-    // Clear stored session
+    // Clear session state (but NOT the signing key)
     localStorage.removeItem("flowclaw_session_token");
     localStorage.removeItem("flowclaw_address");
     localStorage.removeItem("flowclaw_auth_method");

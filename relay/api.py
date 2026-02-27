@@ -253,6 +253,7 @@ class CreatePasskeyAccountRequest(BaseModel):
     publicKey: str
     credentialId: str
     displayName: str = "FlowClaw User"
+    signingKeyBackup: Optional[str] = None  # JWK string for key recovery on re-auth
 
 
 class VerifyPasskeyRequest(BaseModel):
@@ -2063,6 +2064,7 @@ async def create_passkey_account(req: CreatePasskeyAccountRequest):
             public_key_hex=req.publicKey,
             credential_id=req.credentialId,
             display_name=req.displayName,
+            encrypted_signing_key=req.signingKeyBackup,
         )
         logging.info(f"Passkey account created: {result.get('address', 'unknown')}")
         return result

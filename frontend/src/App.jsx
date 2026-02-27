@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { api } from "./api";
 import { AuthProvider, useAuth } from "./AuthContext";
+import { hasSigningKey, loadSigningKey } from "./transactionSigner";
 import { getExplorerUrl, NETWORK } from "./flow-config";
 import LandingPage from "./LandingPage";
 import AgentCanvas from "./AgentCanvas";
@@ -1745,6 +1746,76 @@ const SettingsTab = () => {
         Your API keys are stored on the relay server for your session. Each agent can use a different provider.
         Supports any OpenAI-compatible endpoint (Venice, OpenRouter, Together, Groq) plus Anthropic and local Ollama models.
       </p>
+
+      {/* Account Security Section */}
+      {auth.isLoggedIn && auth.authMethod === "passkey" && (
+        <div className="mt-6 pt-4 border-t border-zinc-800">
+          <h3 className="text-sm font-medium text-zinc-300 flex items-center gap-2 mb-3">
+            <Shield size={14} />
+            Account Security
+          </h3>
+
+          <div className="space-y-2">
+            {/* Signing Key Status */}
+            <div className="bg-zinc-800/50 rounded-lg p-3">
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="text-xs text-zinc-400">Transaction Signing Key</div>
+                  <div className={`text-xs mt-0.5 ${hasSigningKey(auth.user.addr) ? "text-teal-400" : "text-amber-400"}`}>
+                    {hasSigningKey(auth.user.addr) ? "Available — on-chain transactions enabled" : "Missing — on-chain storage disabled"}
+                  </div>
+                </div>
+                {hasSigningKey(auth.user.addr) ? (
+                  <CheckCircle size={14} className="text-teal-500" />
+                ) : (
+                  <AlertTriangle size={14} className="text-amber-500" />
+                )}
+              </div>
+            </div>
+
+            {/* Export Signing Key */}
+            {hasSigningKey(auth.user.addr) && (
+              <button
+                onClick={() => {
+                  const jwk = loadSigningKey(auth.user.addr);
+                  if (!jwk) return;
+                  const blob = new Blob([JSON.stringify(jwk, null, 2)], { type: "application/json" });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url;
+                  a.download = `flowclaw-signing-key-${auth.user.addr}.json`;
+                  a.click();
+                  URL.revokeObjectURL(url);
+                  setSuccess("Signing key exported. Store this file securely — it controls your on-chain account.");
+                }}
+                className="w-full text-left bg-zinc-800/50 rounded-lg p-3 hover:bg-zinc-700/50 transition-colors group"
+              >
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="text-xs text-zinc-300 group-hover:text-zinc-100">Export Signing Key</div>
+                    <div className="text-xs text-zinc-500 mt-0.5">Download a backup of your transaction signing key (JWK format)</div>
+                  </div>
+                  <Download size={14} className="text-zinc-500 group-hover:text-zinc-300" />
+                </div>
+              </button>
+            )}
+
+            {/* Account Address */}
+            <div className="bg-zinc-800/50 rounded-lg p-3">
+              <div className="text-xs text-zinc-400">Flow Account</div>
+              <div className="text-xs font-mono text-zinc-300 mt-0.5 flex items-center gap-2">
+                {auth.user.addr}
+                <button
+                  onClick={() => { navigator.clipboard.writeText(auth.user.addr); setSuccess("Address copied"); }}
+                  className="text-zinc-500 hover:text-zinc-300"
+                >
+                  <Copy size={10} />
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

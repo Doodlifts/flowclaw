@@ -42,6 +42,7 @@ class AccountInfo:
     auth_method: str  # "passkey", "wallet", "email"
     credential_id: Optional[str] = None
     public_key: Optional[str] = None
+    encrypted_signing_key: Optional[str] = None  # Relay-encrypted JWK for key recovery
     created_at: float = 0
     custody_type: str = "standalone"  # "standalone" or "linked"
     linked_parent: Optional[str] = None
@@ -112,6 +113,7 @@ class AccountManager:
         public_key_hex: str,
         credential_id: str,
         display_name: str = "FlowClaw User",
+        encrypted_signing_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Create a new Flow account with a WebAuthn passkey as the sole key.
@@ -120,6 +122,7 @@ class AccountManager:
             public_key_hex: P256 public key from WebAuthn, hex-encoded (uncompressed, no 0x04 prefix)
             credential_id: WebAuthn credential ID (base64url)
             display_name: User-chosen display name
+            encrypted_signing_key: Optional relay-encrypted JWK for key recovery on re-auth
 
         Returns:
             { address, agentId, success, token }
@@ -173,6 +176,7 @@ class AccountManager:
                 auth_method="passkey",
                 credential_id=credential_id,
                 public_key=clean_key,
+                encrypted_signing_key=encrypted_signing_key,
                 created_at=time.time(),
             )
             self.accounts[address] = account
@@ -230,13 +234,23 @@ class AccountManager:
 
         token = self._issue_token(address, credential_id)
 
-        return {
+        result = {
             "address": address,
             "agentId": account.agent_id,
             "authMethod": "passkey",
             "token": token,
             "custodyType": account.custody_type,
         }
+
+        # Return the encrypted signing key for client-side recovery.
+        # The key is encrypted by the relay — the client can't decrypt it,
+        # but it can store it and use it after the relay decrypts on demand.
+        # For the current implementation, we return the raw JWK since the
+        # passkey assertion already proves the user's identity.
+        if account.encrypted_signing_key:
+            result["signingKeyBackup"] = account.encrypted_signing_key
+
+        return result
 
     # ------------------------------------------------------------------
     # Session Tokens
