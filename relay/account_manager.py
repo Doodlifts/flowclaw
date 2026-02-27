@@ -380,26 +380,11 @@ class AccountManager:
         self, address: str, agent_name: str
     ) -> int:
         """
-        Run setup_full_account.cdc to initialize all FlowClaw resources.
-        Returns the agent ID.
+        Run setup_full_account.cdc to initialize all FlowClaw storage resources.
+        No agent is created here — user does that after configuring their LLM provider.
+        Returns 0 (no agent yet).
         """
-        arguments = [
-            {"type": "String", "value": agent_name},
-            {"type": "String", "value": f"FlowClaw AI agent for {agent_name}"},
-            {"type": "String", "value": "venice"},
-            {"type": "String", "value": "claude-sonnet-4-6"},
-            {"type": "String", "value": ""},  # apiKeyHash
-            {"type": "UInt64", "value": "4096"},
-            {"type": "UFix64", "value": "0.70000000"},
-            {"type": "String", "value": (
-                "You are FlowClaw, an autonomous AI agent running on the Flow blockchain. "
-                "Your conversations are stored on-chain with end-to-end encryption. "
-                "Be helpful, concise, and use your tools when you need real data."
-            )},
-            {"type": "UInt8", "value": "1"},  # autonomyLevel: supervised
-            {"type": "UInt64", "value": "100"},  # maxActionsPerHour
-            {"type": "UFix64", "value": "5.00000000"},  # maxCostPerDay
-        ]
+        arguments = []  # Transaction takes no arguments now
 
         result = self._run_transaction(
             "cadence/transactions/setup_full_account.cdc",
@@ -421,8 +406,8 @@ class AccountManager:
             if has_error and "sealed" not in result_str.lower():
                 raise RuntimeError(f"FlowClaw initialization failed: {result_str[:500]}")
 
-        # Extract agent ID (for PoC, use local counter)
-        return 1  # Default agent ID; in production parse from events
+        # No agent created during setup — user creates one after adding LLM provider
+        return 0
 
     def _run_transaction(self, tx_path: str, arguments: list) -> Any:
         """
