@@ -118,6 +118,7 @@ _agent_user_map: Dict[int, str] = {}
 # Session owner mapping: session_id -> user_address (for filtering sessions by user)
 _session_owners: Dict[int, str] = {}
 session_messages: Dict[int, List[Dict]] = {}  # Local cache for PoC
+_sessions_with_system_prompt: set = set()  # Track which sessions have had system prompt injected
 memory_cache: Dict[int, Dict] = {}  # Local cache for memory operations
 tasks_cache: Dict[int, Dict] = {}  # Local cache for task operations
 hooks_cache: Dict[int, Dict] = {}  # Local cache for hook operations
@@ -2164,19 +2165,21 @@ async def send_message(req: SendMessageRequest, request: Request):
 
     # Auto-resolve session ID: use off-chain session management
     # On-chain sessions require multi-party signing (not yet implemented)
-    is_new_session = req.sessionId not in session_messages
-    if is_new_session:
-        # Create a new off-chain session for this ID
+    # Ensure session exists in the dict (may have been pre-created by /chat/create-session)
+    if req.sessionId not in session_messages:
         session_messages[req.sessionId] = []
-        # Track session owner for per-user filtering
-        if address:
-            _session_owners[req.sessionId] = address
         logging.info(f"Auto-created off-chain session {req.sessionId} for user {address}")
+    # Track session owner for per-user filtering
+    if address and req.sessionId not in _session_owners:
+        _session_owners[req.sessionId] = address
 
     logging.info(f"Session ID for this message: {req.sessionId}")
 
-    # Build message history for this session
-    if is_new_session:
+    # Inject system prompt on the FIRST message, not just on session creation.
+    # /chat/create-session pre-creates the session dict but has no user address,
+    # so we inject the system prompt here on the first actual message.
+    needs_system_prompt = req.sessionId not in _sessions_with_system_prompt
+    if needs_system_prompt:
         # Build system prompt with memory context and real tool definitions
         tool_defs = agent_tool_executor.get_tool_definitions() if agent_tool_executor else []
         system_content = (
@@ -2248,6 +2251,8 @@ async def send_message(req: SendMessageRequest, request: Request):
         )
 
         session_messages[req.sessionId] = [{"role": "system", "content": system_content}]
+        _sessions_with_system_prompt.add(req.sessionId)
+        logging.info(f"System prompt injected for session {req.sessionId}, address={address}")
     else:
         # Update system prompt with fresh memory context for ongoing sessions (user-specific)
         memory_context = _build_memory_context(req.content, address)
