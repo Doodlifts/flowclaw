@@ -603,20 +603,36 @@ async def startup():
             logging.info(f"Sub-agent {sub_id} ({name}) starting task: {task_description[:100]}")
             agents_cache[sub_id]["status"] = "running"
 
-            # Resolve provider: check sub-agent's inherited provider, then parent's, then any available
+            # Resolve provider using the same logic as chat:
+            # 1. Check user's BYOK provider (if user address is known)
+            # 2. Check sub-agent's inherited provider name
+            # 3. Check parent agent's provider name
+            # 4. Fall back to any available global provider
             provider = None
             sub_entry = agents_cache.get(sub_id, {})
+            user_address = sub_entry.get("userAddress")
             provider_name = sub_entry.get("provider")
-            if provider_name and provider_name in providers:
+
+            # Try user's BYOK provider first (handles OpenAI, Anthropic, any custom provider)
+            if user_address:
+                provider = _get_user_provider(user_address, provider_name)
+
+            # Fall back to named provider in global dict
+            if not provider and provider_name and provider_name in providers:
                 provider = providers[provider_name]
+
+            # Fall back to parent agent's provider
             if not provider:
                 parent_id = sub_entry.get("parentAgentId")
                 if parent_id and parent_id in agents_cache:
                     parent_provider_name = agents_cache[parent_id].get("provider")
                     if parent_provider_name and parent_provider_name in providers:
                         provider = providers[parent_provider_name]
+
+            # Last resort: first available global provider
             if not provider and providers:
-                provider = list(providers.values())[0]  # fallback to first available
+                provider = list(providers.values())[0]
+
             if not provider:
                 agents_cache[sub_id]["status"] = "error"
                 agents_cache[sub_id]["lastResult"] = "No LLM provider configured"
@@ -820,6 +836,7 @@ async def startup():
             "lastResult": None,
             "provider": parent_entry.get("provider"),
             "model": parent_entry.get("model"),
+            "userAddress": parent_entry.get("userAddress"),
         }
         logging.info(f"LLM spawned sub-agent: ID={sub_id}, parent={parent_id}, name={name}")
 
@@ -2439,7 +2456,7 @@ async def create_agent(req: CreateAgentRequest):
 
 
 @app.post("/agents/{agent_id}/spawn")
-async def spawn_sub_agent(agent_id: int, req: SpawnSubAgentRequest):
+async def spawn_sub_agent(agent_id: int, req: SpawnSubAgentRequest, request: Request):
     """Spawn a sub-agent from a parent agent."""
     try:
         # Calculate expiry
@@ -2447,8 +2464,13 @@ async def spawn_sub_agent(agent_id: int, req: SpawnSubAgentRequest):
         if req.ttlSeconds:
             expires_at = time.time() + req.ttlSeconds
 
-        # Inherit provider/model from parent agent
+        # Inherit provider/model from parent agent + capture user address for BYOK
         parent_entry = agents_cache.get(agent_id, {})
+        user_address = None
+        try:
+            user_address = _get_authed_address(request)
+        except Exception:
+            user_address = parent_entry.get("userAddress")
 
         sub_id = max(agents_cache.keys()) + 1 if agents_cache else 3
         agents_cache[sub_id] = {
@@ -2466,6 +2488,7 @@ async def spawn_sub_agent(agent_id: int, req: SpawnSubAgentRequest):
             "lastResult": None,
             "provider": parent_entry.get("provider"),
             "model": parent_entry.get("model"),
+            "userAddress": user_address,
         }
 
         logging.info(f"Sub-agent spawned: ID={sub_id}, parent={agent_id}, name={req.name}")

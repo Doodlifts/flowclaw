@@ -340,7 +340,7 @@ export const api = {
   async spawnSubAgent(parentAgentId, subAgent) {
     const res = await fetch(`${API_BASE}/agents/${parentAgentId}/spawn`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body: JSON.stringify(subAgent),
     });
     return handleResponse(res);
