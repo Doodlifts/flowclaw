@@ -850,9 +850,15 @@ async def startup():
                         {"type": "UInt8", "value": str(importance)},
                         {"type": "UInt8", "value": str(emotional_weight)},
                     ])
-                    run_flow_tx("cadence/transactions/store_cognitive_memory.cdc", tx_args)
-                    cog_entry.on_chain = True
-                    logging.info(f"Sub-agent {sub_id} result stored on-chain as cognitive memory: {mem_key}")
+                    queued = _queue_background_tx(
+                        user_address,
+                        "cadence/transactions/store_cognitive_memory.cdc",
+                        tx_args,
+                        description=f"Sub-agent '{name}' result: {mem_key}"
+                    )
+                    if not queued:
+                        cog_entry.on_chain = True
+                    logging.info(f"Sub-agent {sub_id} result {'queued for signing' if queued else 'stored on-chain'}: {mem_key}")
                 except Exception as chain_err:
                     logging.warning(f"Sub-agent memory on-chain commit failed (stored locally): {chain_err}")
             except Exception as mem_err:
@@ -1468,11 +1474,61 @@ _pending_tx_builds: Dict[str, Dict] = {}
 # which would cause sequence number conflicts.
 _user_tx_locks: Dict[str, asyncio.Lock] = {}
 
+# Pending background transactions that need user signature.
+# Background operations (auto-memory from chat, sub-agent results) can't
+# sign because the user's browser isn't involved. These queue up for the
+# frontend to poll, sign, and submit.
+_pending_bg_transactions: Dict[str, list] = {}  # address -> [{ txBuildId, description, createdAt }]
+
 def _get_user_tx_lock(address: str) -> asyncio.Lock:
     """Get or create an async lock for a user's transactions."""
     if address not in _user_tx_locks:
         _user_tx_locks[address] = asyncio.Lock()
     return _user_tx_locks[address]
+
+
+def _queue_background_tx(user_address: str, cadence_path: str, tx_args_json: str, description: str = ""):
+    """Queue a background transaction for user signing instead of sponsor-signing.
+
+    Called by background operations (auto-memory, sub-agent results) that run
+    server-side without the user's browser. Builds an unsigned transaction and
+    stores it in the pending queue for the frontend to poll and sign.
+
+    Falls back to sponsor-signed run_flow_tx() if multi-party build fails.
+    Returns True if queued successfully, False if fell back to sponsor.
+    """
+    if not flow_rest_client or not user_address or user_address == "__global__":
+        # Can't do multi-party, use sponsor
+        run_flow_tx(cadence_path, tx_args_json)
+        return False
+
+    try:
+        cadence_code = Path(config.project_dir, cadence_path).read_text()
+        build_result = flow_rest_client.build_unsigned_transaction(
+            cadence_code=cadence_code,
+            arguments=json.loads(tx_args_json) if isinstance(tx_args_json, str) else tx_args_json,
+            user_address=user_address,
+            user_key_index=0,
+        )
+        build_id = str(_uuid.uuid4())
+        _pending_tx_builds[build_id] = {
+            "build_result": build_result,
+            "user_address": user_address,
+            "created_at": time.time(),
+        }
+        if user_address not in _pending_bg_transactions:
+            _pending_bg_transactions[user_address] = []
+        _pending_bg_transactions[user_address].append({
+            "txBuildId": build_id,
+            "description": description,
+            "createdAt": time.time(),
+        })
+        logging.info(f"Background TX queued for {user_address}: {description} (build_id={build_id[:8]}...)")
+        return True
+    except Exception as e:
+        logging.warning(f"Background multi-party build failed, falling back to sponsor: {e}")
+        run_flow_tx(cadence_path, tx_args_json)
+        return False
 
 
 class BuildTransactionRequest(BaseModel):
@@ -1612,6 +1668,46 @@ async def submit_transaction(req: SubmitTransactionRequest, request: Request):
             flow_rest_client._reset_sequence_number(address, 0)
         logging.error(f"Transaction submit failed: {e}")
         raise HTTPException(status_code=500, detail=f"Transaction submit failed: {str(e)}")
+
+
+@app.get("/transaction/pending")
+async def get_pending_transactions(request: Request):
+    """Get pending background transactions that need the user's signature.
+
+    Background operations (auto-memory, sub-agent results) queue unsigned
+    transactions here. The frontend polls this endpoint, signs each payload,
+    and submits via /transaction/submit.
+    """
+    address = _get_authed_address(request)
+    pending = _pending_bg_transactions.get(address, [])
+
+    # Clean up expired entries (> 5 minutes old)
+    cutoff = time.time() - 300
+    active = []
+    for entry in pending:
+        if entry["createdAt"] > cutoff:
+            active.append(entry)
+        else:
+            # Reset sequence cache for expired builds
+            build_id = entry.get("txBuildId")
+            if build_id and build_id in _pending_tx_builds:
+                if flow_rest_client:
+                    flow_rest_client._reset_sequence_number(address, 0)
+                del _pending_tx_builds[build_id]
+    _pending_bg_transactions[address] = active
+
+    return {
+        "pending": [
+            {
+                "txBuildId": e["txBuildId"],
+                "payloadHex": _pending_tx_builds.get(e["txBuildId"], {}).get("build_result", {}).get("payloadHex", ""),
+                "description": e.get("description", ""),
+                "createdAt": e["createdAt"],
+            }
+            for e in active
+            if e["txBuildId"] in _pending_tx_builds
+        ]
+    }
 
 
 @app.post("/chat/create-session")
@@ -1795,12 +1891,23 @@ def _parse_and_store_memories(response_content: str, user_address: str = None) -
                     {"type": "UInt8", "value": str(importance)},
                     {"type": "UInt8", "value": str(emotional_weight)},
                 ])
-                run_flow_tx("cadence/transactions/store_cognitive_memory.cdc", tx_args)
-                cog_entry.on_chain = True
-                logging.info(
-                    f"Memory '{key}' committed on-chain "
-                    f"(type={MemoryType(memory_type).name}, importance={importance})"
+                queued = _queue_background_tx(
+                    user_address,
+                    "cadence/transactions/store_cognitive_memory.cdc",
+                    tx_args,
+                    description=f"Store memory: {key}"
                 )
+                if queued:
+                    logging.info(
+                        f"Memory '{key}' queued for user signing "
+                        f"(type={MemoryType(memory_type).name}, importance={importance})"
+                    )
+                else:
+                    cog_entry.on_chain = True
+                    logging.info(
+                        f"Memory '{key}' committed on-chain (sponsor-signed) "
+                        f"(type={MemoryType(memory_type).name}, importance={importance})"
+                    )
             except Exception as e:
                 logging.warning(f"Failed to store memory on-chain: {e}")
                 # Fall back to legacy transaction
@@ -1816,7 +1923,12 @@ def _parse_and_store_memories(response_content: str, user_address: str = None) -
                         {"type": "Array", "value": tags_array},
                         {"type": "String", "value": "agent-auto"},
                     ])
-                    run_flow_tx("cadence/transactions/store_memory.cdc", tx_args)
+                    _queue_background_tx(
+                        user_address,
+                        "cadence/transactions/store_memory.cdc",
+                        tx_args,
+                        description=f"Store memory (legacy): {key}"
+                    )
                     cog_entry.on_chain = True
                     logging.info(f"Memory '{key}' stored on-chain (legacy fallback)")
                 except Exception as e2:
@@ -2363,6 +2475,42 @@ async def verify_passkey(req: VerifyPasskeyRequest):
         raise HTTPException(status_code=401, detail="Invalid passkey credential")
 
     return result
+
+
+class WalletSessionRequest(BaseModel):
+    address: str  # Flow address from FCL wallet
+
+
+@app.post("/account/wallet-session")
+async def create_wallet_session(req: WalletSessionRequest):
+    """Issue a session token for a wallet-authenticated user.
+
+    FCL wallet users authenticate via the Flow Wallet browser extension.
+    We trust the address provided since the wallet signed the auth proof.
+    For production, this should verify an account-proof signature.
+    """
+    if not account_manager:
+        raise HTTPException(status_code=503, detail="Account manager not initialized")
+
+    address = req.address.strip()
+    if not address:
+        raise HTTPException(status_code=400, detail="Address required")
+
+    # Normalize address
+    if not address.startswith("0x"):
+        address = "0x" + address
+
+    # Issue a session token with a wallet-specific credential ID
+    credential_id = f"wallet:{address}"
+    token = account_manager._issue_token(address, credential_id, ttl_hours=24)
+
+    logging.info(f"Wallet session created for {address}")
+
+    return {
+        "address": address,
+        "token": token,
+        "authMethod": "wallet",
+    }
 
 
 @app.get("/account/status")
@@ -2917,42 +3065,77 @@ async def store_memory(req: StoreMemoryRequest, request: Request):
             {"type": "String", "value": req.source},
         ])
 
-        # Send transaction
+        # Classify and store in user's cognitive engine (pre-chain)
+        memory_type, importance, emotional_weight = CognitiveMemoryEngine.classify_memory(
+            req.key, req.content, req.tags or []
+        )
+        cognitive_engine = _get_cognitive_engine(user_address)
+        cog_entry = cognitive_engine.store(
+            key=req.key,
+            content=req.content if not encrypted else "[encrypted]",
+            tags=req.tags or [],
+            source=req.source,
+            memory_type=memory_type,
+            importance=importance,
+            emotional_weight=emotional_weight,
+        )
+
+        # Cache in legacy system
+        memory_id = cog_entry.memory_id
+        memory_cache[memory_id] = {
+            "key": req.key,
+            "content": req.content if not encrypted else "[encrypted]",
+            "tags": req.tags,
+            "source": req.source,
+            "encrypted": encrypted,
+            "contentHash": enc["plaintextHash"],
+            "memoryType": memory_type,
+            "importance": importance,
+            "userAddress": user_address,
+        }
+
+        # Multi-party signing: build unsigned tx for frontend to sign
+        if user_address != "__global__" and flow_rest_client:
+            try:
+                cadence_code = Path(config.project_dir, "cadence/transactions/store_memory.cdc").read_text()
+                user_lock = _get_user_tx_lock(user_address)
+                async with user_lock:
+                    build_result = flow_rest_client.build_unsigned_transaction(
+                        cadence_code=cadence_code,
+                        arguments=json.loads(tx_args),
+                        user_address=user_address,
+                        user_key_index=0,
+                    )
+                    build_id = str(_uuid.uuid4())
+                    _pending_tx_builds[build_id] = {
+                        "build_result": build_result,
+                        "user_address": user_address,
+                        "created_at": time.time(),
+                    }
+
+                logging.info(
+                    f"Memory prepared for multi-party signing: ID={memory_id}, key={req.key}, "
+                    f"type={MemoryType(memory_type).name}, importance={importance}"
+                )
+                return {
+                    "memoryId": memory_id,
+                    "success": True,
+                    "pendingSign": True,
+                    "txBuildId": build_id,
+                    "payloadHex": build_result["payloadHex"],
+                }
+            except Exception as build_err:
+                logging.warning(f"Multi-party build failed, falling back to sponsor: {build_err}")
+                # Fall through to sponsor-signed path
+
+        # Fallback: sponsor signs (for unauthenticated or build failure)
         result = run_flow_tx("cadence/transactions/store_memory.cdc", tx_args)
         success = result is not None and ("sealed" in result.lower() or "success" in result.lower())
 
         if success:
-            # Classify and store in user's cognitive engine
-            memory_type, importance, emotional_weight = CognitiveMemoryEngine.classify_memory(
-                req.key, req.content, req.tags or []
-            )
-            cognitive_engine = _get_cognitive_engine(user_address)
-            cog_entry = cognitive_engine.store(
-                key=req.key,
-                content=req.content if not encrypted else "[encrypted]",
-                tags=req.tags or [],
-                source=req.source,
-                memory_type=memory_type,
-                importance=importance,
-                emotional_weight=emotional_weight,
-            )
             cog_entry.on_chain = True
-
-            # Also cache in legacy system (with userAddress for filtering)
-            memory_id = cog_entry.memory_id
-            memory_cache[memory_id] = {
-                "key": req.key,
-                "content": req.content if not encrypted else "[encrypted]",
-                "tags": req.tags,
-                "source": req.source,
-                "encrypted": encrypted,
-                "contentHash": enc["plaintextHash"],
-                "memoryType": memory_type,
-                "importance": importance,
-                "userAddress": user_address,
-            }
             logging.info(
-                f"Memory stored: ID={memory_id}, key={req.key}, "
+                f"Memory stored (sponsor-signed): ID={memory_id}, key={req.key}, "
                 f"type={MemoryType(memory_type).name}, importance={importance}, "
                 f"bonds={cog_entry.bond_count}"
             )

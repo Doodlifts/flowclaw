@@ -472,25 +472,32 @@ const DashboardTab = () => {
   const [stats, setStats] = useState(null);
   const [cogStats, setCogStats] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
-    (async () => {
+    let cancelled = false;
+    const fetchAll = async () => {
       try {
         const [s, g, c] = await Promise.all([
           api.getStatus(),
           api.getGlobalStats(),
           api.getCognitiveStats().catch(() => null),
         ]);
-        setStatus(s);
-        setStats(g);
-        setCogStats(c);
+        if (!cancelled) {
+          setStatus(s);
+          setStats(g);
+          setCogStats(c);
+        }
       } catch (err) {
         console.error("Dashboard load failed:", err);
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
-    })();
-  }, []);
+    };
+    fetchAll();
+    const interval = setInterval(fetchAll, 15000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [refreshKey]);
 
   if (loading) return <div className="p-6 flex items-center gap-2 text-zinc-400"><Spinner /> Loading dashboard...</div>;
 
@@ -519,7 +526,7 @@ const DashboardTab = () => {
               {status?.accountAddress ? `${status.accountAddress.slice(0,8)}...${status.accountAddress.slice(-4)}` : "—"}
             </div>
           </div>
-          <button onClick={() => window.location.reload()} className="p-2 rounded-lg bg-zinc-900 border border-zinc-800 hover:bg-zinc-800 text-zinc-400 transition">
+          <button onClick={() => { setLoading(true); setRefreshKey(k => k + 1); }} className="p-2 rounded-lg bg-zinc-900 border border-zinc-800 hover:bg-zinc-800 text-zinc-400 transition">
             <RefreshCw size={16} />
           </button>
         </div>
@@ -1883,6 +1890,24 @@ function FlowClawDashboard() {
     const interval = setInterval(checkStatus, 10000);
     return () => clearInterval(interval);
   }, [auth.address]);
+
+  // Background: auto-sign pending transactions (memory, sub-agent results)
+  useEffect(() => {
+    const signPending = async () => {
+      try {
+        const results = await api.signPendingTransactions();
+        if (results.length > 0) {
+          const signed = results.filter(r => r.success).length;
+          if (signed > 0) console.log(`Auto-signed ${signed} pending transaction(s)`);
+        }
+      } catch (e) {
+        // Silent — background operation
+      }
+    };
+    signPending();
+    const interval = setInterval(signPending, 30000);
+    return () => clearInterval(interval);
+  }, []);
 
   // Fetch agents
   useEffect(() => {

@@ -82,15 +82,33 @@ export function AuthProvider({ children }) {
 
   // Subscribe to FCL current user (for wallet-connected users)
   useEffect(() => {
-    const unsub = fcl.currentUser.subscribe((currentUser) => {
-      if (currentUser.loggedIn && !authMethod) {
-        setUser(currentUser);
-        setAuthMethod("wallet");
+    const unsub = fcl.currentUser.subscribe(async (currentUser) => {
+      if (currentUser.loggedIn && currentUser.addr && authMethod === "wallet" && !sessionToken) {
+        // Wallet user just authenticated via FCL — get a session token from relay
+        try {
+          const res = await fetch(`${API_BASE}/account/wallet-session`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ address: currentUser.addr }),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            setUser({ loggedIn: true, addr: currentUser.addr });
+            setSessionToken(data.token);
+            setInitialized(true);
+            localStorage.setItem("flowclaw_session_token", data.token);
+            localStorage.setItem("flowclaw_address", currentUser.addr);
+            localStorage.setItem("flowclaw_auth_method", "wallet");
+            console.log("Wallet session established:", currentUser.addr);
+          }
+        } catch (err) {
+          console.error("Wallet session creation failed:", err);
+        }
       }
       setLoading(false);
     });
     return () => unsub();
-  }, [authMethod]);
+  }, [authMethod, sessionToken]);
 
   // Ensure on-chain resources are complete (idempotent repair for existing accounts)
   const repairOnChainResources = async (address, token) => {

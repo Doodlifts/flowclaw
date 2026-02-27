@@ -184,12 +184,76 @@ export const api = {
 
   // Memory
   async storeMemory(key, content, tags = [], source = 'frontend') {
+    const headers = getAuthHeaders();
     const res = await fetch(`${API_BASE}/memory/store`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify({ key, content, tags, source }),
     });
-    return handleResponse(res);
+    const data = await handleResponse(res);
+
+    // If relay returned a pending multi-party build, sign and submit it
+    if (data.pendingSign && data.txBuildId && data.payloadHex) {
+      const address = localStorage.getItem('flowclaw_address');
+      if (address && hasSigningKey(address)) {
+        try {
+          const userSignature = await signFlowPayload(data.payloadHex, address);
+          const submitRes = await fetch(`${API_BASE}/transaction/submit`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              txBuildId: data.txBuildId,
+              userSignature,
+            }),
+          });
+          const submitData = await handleResponse(submitRes);
+          return { ...data, txResult: submitData, onChain: true };
+        } catch (signErr) {
+          console.warn('Memory multi-party signing failed, stored locally:', signErr);
+        }
+      }
+    }
+
+    return data;
+  },
+
+  // Poll and sign pending background transactions (auto-memory, sub-agents)
+  async signPendingTransactions() {
+    const address = localStorage.getItem('flowclaw_address');
+    if (!address || !hasSigningKey(address)) return [];
+
+    const headers = getAuthHeaders();
+    if (!headers['Authorization']) return [];
+
+    try {
+      const res = await fetch(`${API_BASE}/transaction/pending`, { headers });
+      const data = await handleResponse(res);
+      const results = [];
+
+      for (const pending of (data.pending || [])) {
+        try {
+          const userSignature = await signFlowPayload(pending.payloadHex, address);
+          const submitRes = await fetch(`${API_BASE}/transaction/submit`, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              txBuildId: pending.txBuildId,
+              userSignature,
+            }),
+          });
+          const submitData = await handleResponse(submitRes);
+          results.push({ ...pending, result: submitData, success: true });
+        } catch (err) {
+          console.warn(`Failed to sign pending tx ${pending.txBuildId}:`, err);
+          results.push({ ...pending, error: err.message, success: false });
+        }
+      }
+
+      return results;
+    } catch (err) {
+      console.warn('Failed to fetch pending transactions:', err);
+      return [];
+    }
   },
 
   // Tasks

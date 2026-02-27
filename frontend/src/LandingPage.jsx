@@ -235,44 +235,15 @@ export default function LandingPage() {
               <div className="flex-1 border-t border-zinc-800" />
             </div>
 
-            {/* Wallet + Email row */}
-            <div className="flex gap-3">
-              <button
-                onClick={handleWalletConnect}
-                disabled={authLoading}
-                className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-zinc-900 border border-zinc-800 hover:border-zinc-700 text-zinc-300 rounded-xl text-xs font-medium transition disabled:opacity-50"
-              >
-                <Wallet size={14} />
-                Flow Wallet
-              </button>
-              <button
-                onClick={() => setShowEmail(!showEmail)}
-                className="flex-1 flex items-center justify-center gap-2 px-4 py-2.5 bg-zinc-900 border border-zinc-800 hover:border-zinc-700 text-zinc-300 rounded-xl text-xs font-medium transition"
-              >
-                <Mail size={14} />
-                Email
-              </button>
-            </div>
-
-            {showEmail && (
-              <div className="flex items-center gap-2 bg-zinc-900 border border-zinc-800 rounded-xl p-2">
-                <input
-                  type="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && handleEmailLogin()}
-                  placeholder="your@email.com"
-                  className="flex-1 bg-transparent text-sm text-zinc-100 placeholder-zinc-600 outline-none px-3 py-2"
-                />
-                <button
-                  onClick={handleEmailLogin}
-                  disabled={!email.trim() || authLoading}
-                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-medium transition disabled:opacity-50"
-                >
-                  {authLoading ? <Loader2 size={14} className="animate-spin" /> : "Continue"}
-                </button>
-              </div>
-            )}
+            {/* Flow Wallet */}
+            <button
+              onClick={handleWalletConnect}
+              disabled={authLoading}
+              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-zinc-900 border border-zinc-800 hover:border-zinc-700 text-zinc-300 rounded-xl text-xs font-medium transition disabled:opacity-50"
+            >
+              <Wallet size={14} />
+              Connect Flow Wallet
+            </button>
 
             {error && (
               <div className="text-xs text-red-400 bg-red-950/30 border border-red-900/30 rounded-lg px-3 py-2">
