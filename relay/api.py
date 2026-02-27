@@ -119,6 +119,7 @@ _agent_user_map: Dict[int, str] = {}
 _session_owners: Dict[int, str] = {}
 session_messages: Dict[int, List[Dict]] = {}  # Local cache for PoC
 _sessions_with_system_prompt: set = set()  # Track which sessions have had system prompt injected
+_run_sub_agent_task_fn = None  # Set during startup(); used by canvas spawn endpoint
 memory_cache: Dict[int, Dict] = {}  # Local cache for memory operations
 tasks_cache: Dict[int, Dict] = {}  # Local cache for task operations
 hooks_cache: Dict[int, Dict] = {}  # Local cache for hook operations
@@ -889,6 +890,10 @@ async def startup():
             logging.error(f"Sub-agent {sub_id} execution error: {e}")
             agents_cache[sub_id]["status"] = "error"
             agents_cache[sub_id]["lastResult"] = f"Execution error: {e}"
+
+    # Expose to module scope so the canvas /agents/{id}/spawn endpoint can call it
+    global _run_sub_agent_task_fn
+    _run_sub_agent_task_fn = _run_sub_agent_task
 
     # Spawn callback for LLM-initiated sub-agent creation
     def _spawn_sub_agent_callback(name: str, description: str, ttl_seconds: float = None, parent_user_addr: str = None):
@@ -3103,7 +3108,10 @@ async def spawn_sub_agent(agent_id: int, req: SpawnSubAgentRequest, request: Req
         logging.info(f"Sub-agent spawned: ID={sub_id}, parent={agent_id}, name={req.name}")
 
         # Kick off the sub-agent's task in the background
-        asyncio.create_task(_run_sub_agent_task(sub_id, req.name, req.description))
+        # _run_sub_agent_task is defined inside startup(), so use the module-level reference
+        if _run_sub_agent_task_fn is None:
+            raise HTTPException(status_code=503, detail="Server still starting up — try again in a moment")
+        asyncio.create_task(_run_sub_agent_task_fn(sub_id, req.name, req.description))
         logging.info(f"Sub-agent {sub_id} background task queued")
 
         return {"agentId": sub_id, "parentId": agent_id, "success": True}
