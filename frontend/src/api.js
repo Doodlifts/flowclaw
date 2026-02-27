@@ -2,6 +2,8 @@
 // Connects to the relay API server
 
 import { signFlowPayload, hasSigningKey } from './transactionSigner';
+import { fcl } from './flow-config';
+import * as fclTypes from '@onflow/types';
 
 const API_BASE = window.location.hostname === 'localhost'
   ? 'http://localhost:8000'
@@ -185,6 +187,11 @@ export const api = {
   // Memory
   async storeMemory(key, content, tags = [], source = 'frontend') {
     const headers = getAuthHeaders();
+    const authMethod = localStorage.getItem('flowclaw_auth_method');
+
+    // Wallet users: encrypt via relay, then sign the tx through the wallet
+    // The relay's /memory/store does encryption + classification but returns
+    // a pending build for passkey users. For wallet users, we handle it differently.
     const res = await fetch(`${API_BASE}/memory/store`, {
       method: 'POST',
       headers,
@@ -195,7 +202,32 @@ export const api = {
     // If relay returned a pending multi-party build, sign and submit it
     if (data.pendingSign && data.txBuildId && data.payloadHex) {
       const address = localStorage.getItem('flowclaw_address');
-      if (address && hasSigningKey(address)) {
+
+      if (authMethod === 'wallet') {
+        // Wallet: can't sign the relay-built payload; instead submit via
+        // signAndSubmitTransaction which uses fcl.mutate()
+        // The relay build is stale — we ignore it and do a fresh FCL transaction
+        try {
+          const txResult = await this.signAndSubmitTransaction(
+            'cadence/transactions/store_memory.cdc',
+            [
+              { type: 'String', value: key },
+              { type: 'String', value: data.encCiphertext || '' },
+              { type: 'String', value: data.encNonce || '' },
+              { type: 'String', value: data.encPlaintextHash || '' },
+              { type: 'String', value: data.encKeyFingerprint || '' },
+              { type: 'UInt8', value: String(data.encAlgorithm || 0) },
+              { type: 'UInt64', value: String(data.encPlaintextLength || 0) },
+              { type: 'Array', value: (tags || []).map(t => ({ type: 'String', value: t })) },
+              { type: 'String', value: source },
+            ]
+          );
+          return { ...data, txResult, onChain: true };
+        } catch (signErr) {
+          console.warn('Memory wallet signing failed, stored locally:', signErr);
+        }
+      } else if (address && hasSigningKey(address)) {
+        // Passkey: sign the relay-built payload locally
         try {
           const userSignature = await signFlowPayload(data.payloadHex, address);
           const submitRes = await fetch(`${API_BASE}/transaction/submit`, {
@@ -220,6 +252,11 @@ export const api = {
   // Poll and sign pending background transactions (auto-memory, sub-agents)
   async signPendingTransactions() {
     const address = localStorage.getItem('flowclaw_address');
+    const authMethod = localStorage.getItem('flowclaw_auth_method');
+    // Wallet users: skip auto-signing to avoid spamming wallet popups.
+    // Background operations fall back to sponsor-signed on the relay.
+    if (authMethod === 'wallet') return [];
+    // Passkey users need a signing key
     if (!address || !hasSigningKey(address)) return [];
 
     const headers = getAuthHeaders();
@@ -519,7 +556,9 @@ export const api = {
 
   /**
    * Build, sign, and submit a transaction using multi-party signing.
-   * User signs as proposer/authorizer, sponsor signs as payer.
+   * Detects auth method and routes accordingly:
+   *   - Passkey users: SubtleCrypto local signing (no popup)
+   *   - Wallet users: FCL mutate with wallet popup for approval
    *
    * @param {string} txPath - Path to .cdc file (relative to project dir)
    * @param {Array} args - Cadence arguments [{"type": "...", "value": "..."}]
@@ -528,12 +567,26 @@ export const api = {
   async signAndSubmitTransaction(txPath, args = []) {
     const address = localStorage.getItem('flowclaw_address');
     if (!address) throw new Error('Not logged in');
+
+    const authMethod = localStorage.getItem('flowclaw_auth_method');
+
+    // Wallet users: sign via FCL (triggers wallet popup)
+    if (authMethod === 'wallet') {
+      return this._signAndSubmitWallet(txPath, args);
+    }
+
+    // Passkey users: sign locally with SubtleCrypto
+    return this._signAndSubmitPasskey(txPath, args, address);
+  },
+
+  /**
+   * Passkey signing: relay builds tx, browser signs with SubtleCrypto, relay submits.
+   */
+  async _signAndSubmitPasskey(txPath, args, address) {
     if (!hasSigningKey(address)) {
       throw new Error('No signing key found. Please create a new account.');
     }
 
-    // Capture auth headers ONCE to avoid race conditions where the token
-    // could be modified between build and submit calls.
     const headers = getAuthHeaders();
     if (!headers['Authorization']) {
       throw new Error('No session token available. Please sign in again.');
@@ -561,4 +614,134 @@ export const api = {
     });
     return handleResponse(submitRes);
   },
+
+  /**
+   * Wallet signing: FCL mutate with wallet popup.
+   * User signs as proposer+authorizer (wallet popup), relay signs as payer.
+   */
+  async _signAndSubmitWallet(txPath, args) {
+    const headers = getAuthHeaders();
+    if (!headers['Authorization']) {
+      throw new Error('No session token available. Please sign in again.');
+    }
+
+    // Step 1: Fetch Cadence source (with resolved imports)
+    const cadenceRes = await fetch(
+      `${API_BASE}/transaction/cadence?path=${encodeURIComponent(txPath)}`,
+      { headers }
+    );
+    const cadenceData = await handleResponse(cadenceRes);
+
+    // Step 2: Fetch sponsor info for payer authorization
+    const sponsorRes = await fetch(`${API_BASE}/sponsor-info`);
+    const sponsor = await handleResponse(sponsorRes);
+
+    // Step 3: Build the payer authorization function
+    // The relay signs the envelope as payer when FCL calls this function
+    const payerAuthz = async (account) => ({
+      ...account,
+      tempId: `${sponsor.address}-${sponsor.keyIndex}`,
+      addr: fcl.sansPrefix(sponsor.address),
+      keyId: sponsor.keyIndex,
+      signingFunction: async (signable) => {
+        const signRes = await fetch(`${API_BASE}/transaction/sign-envelope`, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({ message: signable.message }),
+        });
+        const signData = await handleResponse(signRes);
+        return {
+          addr: fcl.sansPrefix(sponsor.address),
+          keyId: sponsor.keyIndex,
+          signature: signData.signature,
+        };
+      },
+    });
+
+    // Step 4: Convert args to FCL format and execute via fcl.mutate()
+    const fclArgs = args.length > 0
+      ? (arg, t) => args.map(a => convertToFclArg(a, arg, t))
+      : undefined;
+
+    const txId = await fcl.mutate({
+      cadence: cadenceData.cadence,
+      args: fclArgs,
+      proposer: fcl.authz,          // Current wallet user proposes
+      authorizations: [fcl.authz],   // Current wallet user authorizes
+      payer: payerAuthz,             // Relay pays
+      limit: 9999,
+    });
+
+    // Step 5: Wait for transaction to seal
+    const txResult = await fcl.tx(txId).onceSealed();
+
+    return {
+      txId,
+      status: txResult.statusString || 'SEALED',
+      sealed: txResult.status === 4,
+      events: (txResult.events || []).map(e => ({
+        type: e.type,
+        data: e.data,
+      })),
+    };
+  },
 };
+
+
+/**
+ * Convert a Cadence-typed argument to FCL arg format.
+ * Input:  { type: "String", value: "hello" }
+ * Output: arg("hello", t.String)
+ */
+function convertToFclArg(cadenceArg, arg, t) {
+  const { type, value } = cadenceArg;
+
+  switch (type) {
+    case 'String':
+      return arg(value, t.String);
+    case 'UInt8':
+      return arg(String(value), t.UInt8);
+    case 'UInt16':
+      return arg(String(value), t.UInt16);
+    case 'UInt32':
+      return arg(String(value), t.UInt32);
+    case 'UInt64':
+      return arg(String(value), t.UInt64);
+    case 'Int':
+      return arg(String(value), t.Int);
+    case 'Int8':
+      return arg(String(value), t.Int8);
+    case 'Int32':
+      return arg(String(value), t.Int32);
+    case 'UFix64':
+      return arg(String(value), t.UFix64);
+    case 'Fix64':
+      return arg(String(value), t.Fix64);
+    case 'Bool':
+      return arg(value, t.Bool);
+    case 'Address':
+      return arg(value, t.Address);
+    case 'Array':
+      // Arrays of typed values: [{ type: "String", value: "..." }, ...]
+      if (Array.isArray(value) && value.length > 0 && value[0]?.type) {
+        const innerType = fclTypes[value[0].type] || t.String;
+        return arg(
+          value.map(v => v.value),
+          fclTypes.Array(innerType)
+        );
+      }
+      return arg(value || [], fclTypes.Array(fclTypes.String));
+    case 'Optional':
+      if (value === null || value === undefined) {
+        return arg(null, fclTypes.Optional(fclTypes.String));
+      }
+      if (value?.type) {
+        const innerType = fclTypes[value.type] || fclTypes.String;
+        return arg(value.value, fclTypes.Optional(innerType));
+      }
+      return arg(value, fclTypes.Optional(fclTypes.String));
+    default:
+      // Fallback: try as string
+      return arg(String(value), t.String);
+  }
+}

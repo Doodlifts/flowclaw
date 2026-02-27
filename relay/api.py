@@ -1670,6 +1670,113 @@ async def submit_transaction(req: SubmitTransactionRequest, request: Request):
         raise HTTPException(status_code=500, detail=f"Transaction submit failed: {str(e)}")
 
 
+@app.get("/sponsor-info")
+async def get_sponsor_info():
+    """Return the sponsor (payer) account details for FCL multi-party signing.
+
+    Wallet users need the sponsor's address and key index to build transactions
+    where the user is proposer+authorizer and the relay is payer.
+    """
+    if not flow_rest_client:
+        raise HTTPException(status_code=503, detail="Flow REST client not initialized")
+
+    return {
+        "address": flow_rest_client.signer_address,
+        "keyIndex": flow_rest_client.signer_key_index,
+        "hashAlgorithm": "SHA3_256",
+        "signatureAlgorithm": "ECDSA_P256",
+    }
+
+
+class SignEnvelopeRequest(BaseModel):
+    message: str  # Hex-encoded envelope message to sign
+
+
+@app.post("/transaction/sign-envelope")
+async def sign_envelope(req: SignEnvelopeRequest, request: Request):
+    """Sign a transaction envelope as payer (sponsor).
+
+    Used by wallet users with fcl.mutate(): the wallet signs the payload
+    as proposer/authorizer, then calls this endpoint to get the sponsor's
+    envelope signature as payer.
+    """
+    _get_authed_address(request)  # Verify user is authenticated
+
+    if not flow_rest_client:
+        raise HTTPException(status_code=503, detail="Flow REST client not initialized")
+    if not flow_rest_client.signer_private_key_hex:
+        raise HTTPException(status_code=503, detail="Sponsor private key not configured")
+
+    try:
+        from relay.flow_client import _sign_message
+    except ImportError:
+        from flow_client import _sign_message
+
+    try:
+        # Decode the hex message
+        message_bytes = bytes.fromhex(req.message.replace("0x", ""))
+
+        # Sign with the sponsor's key (SHA3_256 hash algo)
+        sig_bytes = _sign_message(
+            message_bytes,
+            flow_rest_client.signer_private_key_hex,
+            flow_rest_client.sig_algo,
+            flow_rest_client.hash_algo,
+        )
+
+        # Return hex-encoded signature (FCL expects hex, not base64)
+        sig_hex = sig_bytes.hex()
+
+        logging.info(f"Envelope signed by sponsor for wallet user")
+        return {"signature": sig_hex}
+
+    except Exception as e:
+        logging.error(f"Envelope signing failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Envelope signing failed: {str(e)}")
+
+
+@app.get("/transaction/cadence")
+async def get_cadence_source(path: str):
+    """Serve Cadence transaction source code for wallet-based signing.
+
+    Wallet users need the Cadence code to pass to fcl.mutate().
+    Only serves files from the cadence/transactions directory.
+
+    Resolves string imports (import "ContractName") to address imports
+    (import ContractName from 0xAddress) using flow.json aliases.
+    """
+    # Security: only allow files from cadence/ directory
+    if ".." in path or not path.startswith("cadence/"):
+        raise HTTPException(status_code=400, detail="Invalid path")
+
+    tx_file = Path(config.project_dir) / path
+    if not tx_file.exists():
+        raise HTTPException(status_code=404, detail=f"Cadence file not found: {path}")
+
+    cadence_code = tx_file.read_text()
+
+    # Resolve string imports using flow.json contract aliases
+    flow_json_path = Path(config.project_dir) / "flow.json"
+    if flow_json_path.exists():
+        try:
+            flow_config = json.loads(flow_json_path.read_text())
+            contracts = flow_config.get("contracts", {})
+            network = config.flow_network or "mainnet"
+            for contract_name, contract_info in contracts.items():
+                aliases = contract_info.get("aliases", {})
+                contract_address = aliases.get(network)
+                if contract_address:
+                    # Replace import "ContractName" → import ContractName from 0xAddress
+                    cadence_code = cadence_code.replace(
+                        f'import "{contract_name}"',
+                        f'import {contract_name} from 0x{contract_address}'
+                    )
+        except Exception as e:
+            logging.warning(f"Failed to resolve Cadence imports: {e}")
+
+    return {"cadence": cadence_code, "path": path}
+
+
 @app.get("/transaction/pending")
 async def get_pending_transactions(request: Request):
     """Get pending background transactions that need the user's signature.
@@ -3125,6 +3232,13 @@ async def store_memory(req: StoreMemoryRequest, request: Request):
                     "pendingSign": True,
                     "txBuildId": build_id,
                     "payloadHex": build_result["payloadHex"],
+                    # Encryption data for wallet users who sign via FCL
+                    "encCiphertext": enc["ciphertext"],
+                    "encNonce": enc["nonce"],
+                    "encPlaintextHash": enc["plaintextHash"],
+                    "encKeyFingerprint": enc["keyFingerprint"],
+                    "encAlgorithm": enc["algorithm"],
+                    "encPlaintextLength": enc["plaintextLength"],
                 }
             except Exception as build_err:
                 logging.warning(f"Multi-party build failed, falling back to sponsor: {build_err}")

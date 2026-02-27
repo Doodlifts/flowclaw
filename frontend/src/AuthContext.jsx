@@ -11,6 +11,7 @@ import {
   hasSigningKey,
   signFlowPayload,
 } from "./transactionSigner";
+import { api } from "./api";
 
 const AuthContext = createContext(null);
 
@@ -100,6 +101,11 @@ export function AuthProvider({ children }) {
             localStorage.setItem("flowclaw_address", currentUser.addr);
             localStorage.setItem("flowclaw_auth_method", "wallet");
             console.log("Wallet session established:", currentUser.addr);
+
+            // Setup on-chain resources (triggers wallet popups for approval)
+            repairOnChainResources(currentUser.addr, data.token).catch(
+              (e) => console.warn("Wallet on-chain setup skipped:", e.message)
+            );
           }
         } catch (err) {
           console.error("Wallet session creation failed:", err);
@@ -111,37 +117,22 @@ export function AuthProvider({ children }) {
   }, [authMethod, sessionToken]);
 
   // Ensure on-chain resources are complete (idempotent repair for existing accounts)
+  // Works for both passkey and wallet users via api.signAndSubmitTransaction
   const repairOnChainResources = async (address, token) => {
-    if (!hasSigningKey(address)) return;
-    const headers = {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-    };
-    const signAndSubmit = async (txPath, args = []) => {
-      const buildRes = await fetch(`${API_BASE}/transaction/build`, {
-        method: "POST", headers,
-        body: JSON.stringify({ transactionPath: txPath, arguments: args }),
-      });
-      if (!buildRes.ok) return null;
-      const buildData = await buildRes.json();
-      const sig = await signFlowPayload(buildData.payloadHex, address);
-      const submitRes = await fetch(`${API_BASE}/transaction/submit`, {
-        method: "POST", headers,
-        body: JSON.stringify({ txBuildId: buildData.txBuildId, userSignature: sig }),
-      });
-      if (!submitRes.ok) return null;
-      return submitRes.json();
-    };
+    const method = localStorage.getItem("flowclaw_auth_method");
+    // Passkey users need a signing key; wallet users sign via FCL
+    if (method !== "wallet" && !hasSigningKey(address)) return;
+
     try {
       // Re-run setup_full_account (idempotent — only creates missing resources)
-      const result = await signAndSubmit("cadence/transactions/setup_full_account.cdc");
+      const result = await api.signAndSubmitTransaction("cadence/transactions/setup_full_account.cdc");
       if (result) console.log("On-chain resources verified/repaired:", result.txId);
 
       // Ensure encryption key fingerprint is registered
       const statusRes = await fetch(`${API_BASE}/status`);
       const status = await statusRes.json();
       if (status.encryptionFingerprint) {
-        await signAndSubmit("cadence/transactions/configure_encryption.cdc", [
+        await api.signAndSubmitTransaction("cadence/transactions/configure_encryption.cdc", [
           { type: "String", value: status.encryptionFingerprint },
           { type: "UInt8", value: "0" },
           { type: "String", value: "relay-key" },
