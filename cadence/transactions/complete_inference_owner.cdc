@@ -59,9 +59,28 @@ transaction(
             from: AgentSession.SessionManagerStoragePath
         ) ?? panic("SessionManager not found.")
 
-        let agent = owner.storage.borrow<auth(AgentRegistry.Execute) &AgentRegistry.Agent>(
-            from: AgentRegistry.AgentStoragePath
-        ) ?? panic("Agent not found.")
+        // Borrow agent from AgentCollection or legacy path
+        let collection = owner.storage.borrow<auth(AgentRegistry.Manage) &AgentRegistry.AgentCollection>(
+            from: AgentRegistry.AgentCollectionStoragePath
+        )
+        var agent: auth(AgentRegistry.Execute) &AgentRegistry.Agent? = nil
+        if collection != nil {
+            let defaultId = collection!.getDefaultAgentId()
+            if defaultId != nil {
+                agent = collection!.borrowAgentManaged(id: defaultId!)
+            } else {
+                let ids = collection!.getAgentIds()
+                if ids.length > 0 {
+                    agent = collection!.borrowAgentManaged(id: ids[0])
+                }
+            }
+        }
+        if agent == nil {
+            agent = owner.storage.borrow<auth(AgentRegistry.Execute) &AgentRegistry.Agent>(
+                from: AgentRegistry.AgentStoragePath
+            )
+        }
+        let activeAgent = agent ?? panic("No agent found.")
 
         let oracleConfig = owner.storage.borrow<auth(InferenceOracle.Relay) &InferenceOracle.OracleConfig>(
             from: InferenceOracle.OracleConfigStoragePath
@@ -70,7 +89,7 @@ transaction(
         // Complete inference — content is CIPHERTEXT, hash is of PLAINTEXT
         agentStack.completeInference(
             sessionManager: sessionManager,
-            agent: agent,
+            agent: activeAgent,
             oracleConfig: oracleConfig,
             sessionId: sessionId,
             requestId: requestId,

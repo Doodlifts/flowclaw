@@ -92,6 +92,48 @@ export function AuthProvider({ children }) {
     return () => unsub();
   }, [authMethod]);
 
+  // Ensure on-chain resources are complete (idempotent repair for existing accounts)
+  const repairOnChainResources = async (address, token) => {
+    if (!hasSigningKey(address)) return;
+    const headers = {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    };
+    const signAndSubmit = async (txPath, args = []) => {
+      const buildRes = await fetch(`${API_BASE}/transaction/build`, {
+        method: "POST", headers,
+        body: JSON.stringify({ transactionPath: txPath, arguments: args }),
+      });
+      if (!buildRes.ok) return null;
+      const buildData = await buildRes.json();
+      const sig = await signFlowPayload(buildData.payloadHex, address);
+      const submitRes = await fetch(`${API_BASE}/transaction/submit`, {
+        method: "POST", headers,
+        body: JSON.stringify({ txBuildId: buildData.txBuildId, userSignature: sig }),
+      });
+      if (!submitRes.ok) return null;
+      return submitRes.json();
+    };
+    try {
+      // Re-run setup_full_account (idempotent — only creates missing resources)
+      const result = await signAndSubmit("cadence/transactions/setup_full_account.cdc");
+      if (result) console.log("On-chain resources verified/repaired:", result.txId);
+
+      // Ensure encryption key fingerprint is registered
+      const statusRes = await fetch(`${API_BASE}/status`);
+      const status = await statusRes.json();
+      if (status.encryptionFingerprint) {
+        await signAndSubmit("cadence/transactions/configure_encryption.cdc", [
+          { type: "String", value: status.encryptionFingerprint },
+          { type: "UInt8", value: "0" },
+          { type: "String", value: "relay-key" },
+        ]);
+      }
+    } catch (err) {
+      console.warn("On-chain resource repair skipped:", err.message);
+    }
+  };
+
   // Restore session from localStorage on mount
   useEffect(() => {
     const storedToken = localStorage.getItem("flowclaw_session_token");
@@ -112,6 +154,8 @@ export function AuthProvider({ children }) {
             setSessionToken(storedToken);
             setCustodyType(data.custodyType || "standalone");
             setInitialized(true);
+            // Repair any missing on-chain resources (runs in background)
+            repairOnChainResources(storedAddr, storedToken);
           } else {
             // Token expired, clear
             localStorage.removeItem("flowclaw_session_token");

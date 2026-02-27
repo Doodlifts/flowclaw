@@ -82,7 +82,13 @@ transaction {
             signer.storage.save(<- encryptionConfig, to: AgentEncryption.EncryptionConfigStoragePath)
         }
 
-        // 10. Auto-authorize owner as relay
+        // 10. Create AgentStack orchestrator (agentId 0 = placeholder until agent is created)
+        if signer.storage.type(at: FlowClaw.FlowClawStoragePath) == nil {
+            let agentStack <- FlowClaw.createAgentStack(ownerAddress: ownerAddress, agentId: 0)
+            signer.storage.save(<- agentStack, to: FlowClaw.FlowClawStoragePath)
+        }
+
+        // 11. Auto-authorize owner as relay
         let oracleRef = signer.storage.borrow<auth(InferenceOracle.ManageRelays) &InferenceOracle.OracleConfig>(
             from: InferenceOracle.OracleConfigStoragePath
         )
