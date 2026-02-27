@@ -4,6 +4,12 @@
 
 import { createContext, useContext, useState, useEffect } from "react";
 import { fcl } from "./flow-config";
+import {
+  generateSigningKeyPair,
+  storeSigningKey,
+  removeSigningKey,
+  hasSigningKey,
+} from "./transactionSigner";
 
 const AuthContext = createContext(null);
 
@@ -177,11 +183,16 @@ export function AuthProvider({ children }) {
 
       if (!credential) throw new Error("Passkey creation cancelled");
 
-      // Extract the P256 public key
-      const publicKeyHex = extractP256PublicKey(credential.response);
+      // Passkey is for authentication only — extract credential ID
       const credentialId = bufferToBase64url(credential.rawId);
 
-      // Send to relay to create Flow account
+      // Generate a SEPARATE P256 signing key via SubtleCrypto for Flow transactions.
+      // The passkey lives in Secure Enclave and can't sign arbitrary bytes (WebAuthn limitation).
+      // This SubtleCrypto key handles on-chain transaction signing (SHA-256 compatible).
+      const { publicKeyHex, privateKeyJwk } = await generateSigningKeyPair();
+
+      // Send the SubtleCrypto public key (NOT the passkey's key) to the relay.
+      // The relay creates a Flow account with this key + SHA2_256 hash algo.
       const res = await fetch(`${API_BASE}/account/create-passkey`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -198,6 +209,9 @@ export function AuthProvider({ children }) {
       }
 
       const data = await res.json();
+
+      // Store the SubtleCrypto signing key, keyed by the new Flow address
+      storeSigningKey(data.address, privateKeyJwk);
 
       // Store credentials locally
       localStorage.setItem("flowclaw_credential_id", credentialId);
@@ -304,6 +318,10 @@ export function AuthProvider({ children }) {
   // Disconnect
   // ------------------------------------------------------------------
   const disconnectWallet = () => {
+    // Remove signing key before clearing address
+    const addr = user.addr;
+    if (addr) removeSigningKey(addr);
+
     fcl.unauthenticate();
     setUser({ loggedIn: false, addr: null });
     setInitialized(false);
@@ -394,6 +412,7 @@ export function AuthProvider({ children }) {
     isCustodial: user.custodial || false,
     passkeyCreating,
     hasStoredPasskey: !!localStorage.getItem("flowclaw_credential_id"),
+    hasSigningKey: user.addr ? hasSigningKey(user.addr) : false,
 
     // Auth methods
     connectWallet,

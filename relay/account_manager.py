@@ -319,7 +319,7 @@ class AccountManager:
                 address = self.flow_client.create_account(
                     new_public_key_hex=p256_public_key_hex,
                     sig_algo="ECDSA_P256",
-                    hash_algo="SHA3_256",
+                    hash_algo="SHA2_256",
                     key_weight=1000,
                     initial_flow=0.001,
                 )
@@ -337,7 +337,7 @@ class AccountManager:
                 "flow", "accounts", "create",
                 "--key", p256_public_key_hex,
                 "--sig-algo", "ECDSA_P256",
-                "--hash-algo", "SHA3_256",
+                "--hash-algo", "SHA2_256",
                 "--signer", self.sponsor_key_name,
                 "--network", self.network,
                 "--output", "json",

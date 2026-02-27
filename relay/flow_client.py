@@ -681,6 +681,235 @@ class FlowRESTClient:
             logger.error(f"Transaction submission error: {e}")
             raise RuntimeError(f"Transaction submission error: {e}")
 
+    # ------------------------------------------------------------------
+    # Multi-Party Transaction Building (user = proposer/authorizer, sponsor = payer)
+    # ------------------------------------------------------------------
+
+    def build_unsigned_transaction(
+        self,
+        cadence_code: str,
+        arguments: Optional[List[Dict]] = None,
+        user_address: str = None,
+        user_key_index: int = 0,
+        gas_limit: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Build a transaction payload for multi-party signing.
+
+        The user is proposer + authorizer, the sponsor (self.signer_address) is payer.
+        Returns the payload hex that the user must sign, plus metadata needed for completion.
+
+        Args:
+            cadence_code: Cadence transaction source code
+            arguments: Transaction arguments [{"type": "...", "value": "..."}]
+            user_address: User's Flow address (proposer + authorizer)
+            user_key_index: User's key index (default 0)
+            gas_limit: Gas limit override
+
+        Returns:
+            {
+                "payloadHex": "...",    # Hex bytes the user must sign
+                "payloadFields": [...], # Serialized payload fields for completion
+                "referenceBlockId": "...",
+                "sequenceNumber": int,
+                "userAddress": "...",
+                "userKeyIndex": int,
+                "gasLimit": int,
+                "script_b64": "...",    # For REST API submission
+                "args_b64": [...],      # For REST API submission
+            }
+        """
+        if not user_address:
+            raise ValueError("user_address is required for multi-party transactions")
+        if not self.signer_address:
+            raise RuntimeError("Sponsor (payer) not configured — set signer_address")
+
+        # Resolve imports
+        cadence_code = self._resolve_imports(cadence_code)
+
+        # Defaults
+        gas = gas_limit or self.default_gas_limit
+        payer = self.signer_address
+
+        # Get reference block and user's sequence number
+        ref_block_id = self._get_latest_block_id()
+        seq_number = self._get_sequence_number(user_address, user_key_index)
+
+        # Encode script and arguments
+        script_bytes = cadence_code.encode("utf-8")
+        arg_bytes_list = []
+        if arguments:
+            for arg in arguments:
+                arg_bytes_list.append(json.dumps(arg).encode("utf-8"))
+
+        # Build payload fields (Flow's canonical 9-field flat format)
+        ref_block_bytes = bytes.fromhex(ref_block_id)
+        user_bytes = _address_bytes(user_address)
+        payer_bytes = _address_bytes(payer)
+        authorizer_bytes_list = [user_bytes]  # User is sole authorizer
+
+        payload_fields = [
+            script_bytes,
+            arg_bytes_list,
+            ref_block_bytes,
+            gas,
+            user_bytes,           # proposer address
+            user_key_index,       # proposer key index
+            seq_number,           # proposer sequence number
+            payer_bytes,          # payer (sponsor)
+            authorizer_bytes_list,  # authorizers (user only)
+        ]
+
+        # RLP encode the payload and prepend domain tag
+        payload_rlp = rlp_encode(payload_fields)
+        payload_message = TRANSACTION_DOMAIN_TAG + payload_rlp
+
+        # Pre-encode for REST API submission
+        script_b64 = base64.b64encode(script_bytes).decode("utf-8")
+        args_b64 = []
+        if arguments:
+            for arg in arguments:
+                args_b64.append(_encode_cadence_argument(arg))
+
+        return {
+            "payloadHex": payload_message.hex(),
+            "referenceBlockId": ref_block_id,
+            "sequenceNumber": seq_number,
+            "userAddress": user_address,
+            "userKeyIndex": user_key_index,
+            "gasLimit": gas,
+            # Internal fields needed for complete_multi_party_transaction
+            "_payload_fields": payload_fields,
+            "_script_b64": script_b64,
+            "_args_b64": args_b64,
+            "_payer": payer,
+            "_user_address": user_address,
+        }
+
+    def complete_multi_party_transaction(
+        self,
+        build_result: Dict,
+        user_signature_b64: str,
+        wait_sealed: bool = True,
+        timeout: int = 120,
+    ) -> Dict[str, Any]:
+        """
+        Complete a multi-party transaction by adding the payer's envelope signature
+        and submitting to Flow.
+
+        Args:
+            build_result: The result from build_unsigned_transaction()
+            user_signature_b64: Base64-encoded user payload signature (r||s, 64 bytes)
+            wait_sealed: Whether to poll until sealed
+            timeout: Max seconds to wait
+
+        Returns:
+            {"txId": "...", "status": "SEALED", "events": [...], "sealed": True/False}
+        """
+        if not self.signer_private_key_hex:
+            raise RuntimeError("Sponsor private key not configured")
+
+        payload_fields = build_result["_payload_fields"]
+        user_address = build_result["_user_address"]
+        payer = build_result["_payer"]
+        user_key_index = build_result["userKeyIndex"]
+
+        # Decode user's payload signature
+        user_sig_bytes = base64.b64decode(user_signature_b64)
+
+        # Build signer list to determine indices
+        user_bytes = _address_bytes(user_address)
+        payer_bytes = _address_bytes(payer)
+        authorizer_bytes_list = [user_bytes]
+
+        user_signer_index = _get_signer_index(
+            user_bytes, user_bytes, authorizer_bytes_list, payer_bytes
+        )
+
+        # Payload signatures: user signs the payload as proposer/authorizer
+        payload_signatures = [
+            [user_signer_index, user_key_index, user_sig_bytes]
+        ]
+
+        # Build envelope: [payload_fields, payload_signatures]
+        envelope_fields = [payload_fields, payload_signatures]
+        envelope_rlp = rlp_encode(envelope_fields)
+        envelope_message = TRANSACTION_DOMAIN_TAG + envelope_rlp
+
+        # Sponsor signs the envelope as payer
+        envelope_sig = _sign_message(
+            envelope_message,
+            self.signer_private_key_hex,
+            self.sig_algo,
+            self.hash_algo,
+        )
+
+        payer_signer_index = _get_signer_index(
+            payer_bytes, user_bytes, authorizer_bytes_list, payer_bytes
+        )
+
+        # Build REST API request
+        payload_sigs_rest = [
+            {
+                "address": _normalize_address(user_address),
+                "key_index": str(user_key_index),
+                "signature": user_signature_b64,
+            }
+        ]
+
+        tx_body = {
+            "script": build_result["_script_b64"],
+            "arguments": build_result["_args_b64"],
+            "reference_block_id": build_result["referenceBlockId"],
+            "gas_limit": str(build_result["gasLimit"]),
+            "payer": _normalize_address(payer),
+            "proposal_key": {
+                "address": _normalize_address(user_address),
+                "key_index": str(user_key_index),
+                "sequence_number": str(build_result["sequenceNumber"]),
+            },
+            "authorizers": [_normalize_address(user_address)],
+            "payload_signatures": payload_sigs_rest,
+            "envelope_signatures": [
+                {
+                    "address": _normalize_address(payer),
+                    "key_index": str(self.signer_key_index),
+                    "signature": base64.b64encode(envelope_sig).decode("utf-8"),
+                }
+            ],
+        }
+
+        # Submit
+        try:
+            resp = self._session.post(
+                f"{self.access_node}/v1/transactions",
+                json=tx_body,
+                timeout=30,
+            )
+
+            if resp.status_code not in (200, 201):
+                error_body = resp.text[:1000]
+                logger.error(f"Multi-party TX submission failed ({resp.status_code}): {error_body}")
+                raise RuntimeError(f"Transaction failed: {error_body}")
+
+            tx_data = resp.json()
+            tx_id = tx_data.get("id", "")
+
+            logger.info(f"Multi-party TX submitted: {tx_id} (user={user_address}, payer={payer})")
+
+            if wait_sealed and tx_id:
+                return self._wait_for_seal(tx_id, timeout)
+
+            return {
+                "txId": tx_id,
+                "status": "SUBMITTED",
+                "statusCode": 1,
+            }
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Multi-party TX submission error: {e}")
+            raise RuntimeError(f"Transaction submission error: {e}")
+
     def send_transaction_from_file(
         self,
         tx_path: str,

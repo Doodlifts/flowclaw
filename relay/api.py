@@ -967,7 +967,12 @@ def run_flow_tx(tx_path: str, args_json: str = None) -> Optional[str]:
     """
     Send a Cadence transaction.
 
-    Uses Flow REST API via FlowRESTClient (preferred) with CLI fallback.
+    NOTE: Currently all transactions run on the sponsor account.
+    User-specific transactions (sessions, messages, agents) need multi-party signing
+    (user passkey signs as authorizer, sponsor signs as payer) which is not yet implemented.
+    For now, on-chain transactions are best-effort — failures are logged but don't break
+    the off-chain functionality.
+
     Returns a string containing "sealed" on success for backward compat.
     """
     if flow_rest_client and flow_rest_client.signer_private_key_hex:
@@ -1274,46 +1279,149 @@ async def sync_extensions_endpoint():
         raise HTTPException(status_code=500, detail=f"Error syncing extensions: {str(e)}")
 
 
+# -----------------------------------------------------------------------
+# Multi-Party Transaction Signing
+# -----------------------------------------------------------------------
+
+# In-memory cache for pending unsigned transactions (keyed by build ID)
+import uuid as _uuid
+_pending_tx_builds: Dict[str, Dict] = {}
+
+
+class BuildTransactionRequest(BaseModel):
+    transactionPath: str  # Path to .cdc file relative to project dir
+    arguments: List[Dict] = []  # Cadence arguments [{"type": "...", "value": "..."}]
+
+
+class SubmitTransactionRequest(BaseModel):
+    txBuildId: str
+    userSignature: str  # Base64-encoded raw signature (r||s, 64 bytes)
+
+
+@app.post("/transaction/build")
+async def build_transaction(req: BuildTransactionRequest, request: Request):
+    """Build an unsigned transaction for multi-party signing.
+
+    The authenticated user becomes proposer + authorizer.
+    The sponsor (relay) becomes the payer.
+    Returns a payloadHex that the user must sign client-side.
+    """
+    address = _get_authed_address(request)
+
+    if not flow_rest_client:
+        raise HTTPException(status_code=503, detail="Flow REST client not initialized")
+
+    try:
+        # Read the Cadence transaction file
+        tx_file = Path(config.project_dir) / req.transactionPath
+        if not tx_file.exists():
+            raise HTTPException(status_code=404, detail=f"Transaction file not found: {req.transactionPath}")
+
+        cadence_code = tx_file.read_text()
+
+        # Build the unsigned transaction
+        build_result = flow_rest_client.build_unsigned_transaction(
+            cadence_code=cadence_code,
+            arguments=req.arguments if req.arguments else None,
+            user_address=address,
+            user_key_index=0,  # User accounts created with key index 0
+        )
+
+        # Store in cache with a unique build ID (expires after 5 minutes)
+        build_id = str(_uuid.uuid4())
+        _pending_tx_builds[build_id] = {
+            "build_result": build_result,
+            "user_address": address,
+            "created_at": time.time(),
+        }
+
+        # Clean up old builds (older than 5 minutes)
+        cutoff = time.time() - 300
+        expired = [k for k, v in _pending_tx_builds.items() if v["created_at"] < cutoff]
+        for k in expired:
+            del _pending_tx_builds[k]
+
+        logging.info(f"Transaction built for {address}: {req.transactionPath} (build_id={build_id[:8]}...)")
+
+        return {
+            "txBuildId": build_id,
+            "payloadHex": build_result["payloadHex"],
+            "referenceBlockId": build_result["referenceBlockId"],
+            "sequenceNumber": build_result["sequenceNumber"],
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Transaction build failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Transaction build failed: {str(e)}")
+
+
+@app.post("/transaction/submit")
+async def submit_transaction(req: SubmitTransactionRequest, request: Request):
+    """Submit a signed multi-party transaction.
+
+    The user provides their payload signature. The relay adds the payer (sponsor)
+    envelope signature and submits to Flow.
+    """
+    address = _get_authed_address(request)
+
+    if not flow_rest_client:
+        raise HTTPException(status_code=503, detail="Flow REST client not initialized")
+
+    # Look up the pending build
+    pending = _pending_tx_builds.get(req.txBuildId)
+    if not pending:
+        raise HTTPException(status_code=404, detail="Transaction build not found or expired")
+
+    # Verify the build belongs to this user
+    if pending["user_address"] != address:
+        raise HTTPException(status_code=403, detail="Transaction build belongs to a different user")
+
+    # Check expiry (5 minute window)
+    if time.time() - pending["created_at"] > 300:
+        del _pending_tx_builds[req.txBuildId]
+        raise HTTPException(status_code=410, detail="Transaction build expired")
+
+    try:
+        # Complete the multi-party transaction
+        result = flow_rest_client.complete_multi_party_transaction(
+            build_result=pending["build_result"],
+            user_signature_b64=req.userSignature,
+        )
+
+        # Clean up the pending build
+        del _pending_tx_builds[req.txBuildId]
+
+        logging.info(
+            f"Multi-party TX completed: {result.get('txId', 'unknown')} "
+            f"(user={address}, status={result.get('status', 'unknown')})"
+        )
+
+        return {
+            "txId": result.get("txId", ""),
+            "status": result.get("status", "UNKNOWN"),
+            "sealed": result.get("sealed", False),
+            "events": result.get("events", []),
+            "error": result.get("error", ""),
+        }
+
+    except Exception as e:
+        logging.error(f"Transaction submit failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Transaction submit failed: {str(e)}")
+
+
 @app.post("/chat/create-session")
 async def create_session(req: CreateSessionRequest):
-    """Create a new session on-chain. Falls back to off-chain session if no agent exists yet."""
-    try:
-        args = json.dumps([{"type": "UInt64", "value": str(req.maxContextMessages)}])
-        result = run_flow_tx("cadence/transactions/create_session.cdc", args)
+    """Create a new chat session (off-chain for now).
 
-        if result and ("sealed" in result.lower()):
-            # Query on-chain session count to get the latest session ID
-            # Sessions are 0-indexed, so latest = count - 1
-            acct_result = run_flow_script(
-                "cadence/scripts/get_account_status.cdc",
-                json.dumps([{"type": "Address", "value": config.flow_account_address}])
-            )
-            session_id = 0
-            if acct_result:
-                count_match = re.search(r'sessionCount:\s*(\d+)', acct_result)
-                if count_match:
-                    count = int(count_match.group(1))
-                    session_id = count - 1
-                    logging.info(f"On-chain session count: {count}, using session ID: {session_id}")
-                else:
-                    logging.warning(f"Could not parse sessionCount from: {acct_result[:200]}")
-            else:
-                logging.warning("Could not query account status for session count")
-
-            session_messages[session_id] = []
-            return {"sessionId": session_id, "success": True, "txResult": "sealed"}
-        else:
-            # On-chain session creation failed — fall back to off-chain session
-            logging.warning(f"On-chain session creation failed (no agent yet?), using off-chain session: {str(result)[:200]}")
-            session_id = len(session_messages)
-            session_messages[session_id] = []
-            return {"sessionId": session_id, "success": True, "txResult": "off-chain"}
-    except Exception as e:
-        # Graceful fallback — create off-chain session (user may not have created an agent yet)
-        logging.warning(f"Session creation error, falling back to off-chain: {e}")
-        session_id = len(session_messages)
-        session_messages[session_id] = []
-        return {"sessionId": session_id, "success": True, "txResult": "off-chain"}
+    On-chain sessions require multi-party signing (user passkey + sponsor payer)
+    which is not yet implemented. Sessions are managed off-chain in the relay cache.
+    """
+    session_id = len(session_messages)
+    session_messages[session_id] = []
+    logging.info(f"Session created (off-chain): ID={session_id}")
+    return {"sessionId": session_id, "success": True, "txResult": "off-chain"}
 
 
 def _build_memory_context(user_message: str) -> str:
@@ -1545,55 +1653,15 @@ async def send_message(req: SendMessageRequest, request: Request):
         else:
             raise HTTPException(
                 status_code=503,
-                detail="No LLM providers configured. Add a provider in Settings or set VENICE_API_KEY in .env"
+                detail="No LLM provider configured. Go to Settings and add your API key for Venice, OpenAI, Anthropic, or another provider."
             )
 
-    # Auto-resolve session ID: ensure we have a valid on-chain session
-    # On-chain sessions start at 1 (not 0). If the frontend sends an invalid
-    # session ID, query on-chain for the latest one or create a new session.
-    if req.sessionId == 0 or req.sessionId > 100000:
-        # Likely a bogus ID — try to find the latest real session
-        try:
-            acct_result = run_flow_script(
-                "cadence/scripts/get_account_status.cdc",
-                json.dumps([{"type": "Address", "value": config.flow_account_address}])
-            )
-            logging.info(f"Account status result: {str(acct_result)[:300]}")
-            if acct_result:
-                # Try multiple patterns: JSON format and Cadence struct format
-                count = None
-                # JSON: "sessionCount": 9 or "sessionCount":9
-                count_match = re.search(r'"?sessionCount"?\s*[:=]\s*(\d+)', acct_result)
-                if count_match:
-                    count = int(count_match.group(1))
-                if count is None:
-                    # Also try parsing as JSON directly
-                    try:
-                        parsed = json.loads(acct_result.replace("Result: ", "", 1))
-                        if isinstance(parsed, dict):
-                            count = int(parsed.get("sessionCount", 0))
-                    except (json.JSONDecodeError, ValueError, TypeError):
-                        pass
-                if count is not None and count > 0:
-                    # Use the latest session (sessions are 1-indexed)
-                    req.sessionId = count
-                    logging.info(f"Auto-resolved session ID to {req.sessionId} (latest of {count} sessions)")
-                elif count == 0 or count is None:
-                    # No sessions exist — create one
-                    logging.info(f"No on-chain sessions found (count={count}), creating one...")
-                    create_args = json.dumps([{"type": "UInt64", "value": "50"}])
-                    create_result = run_flow_tx("cadence/transactions/create_session.cdc", create_args)
-                    if create_result and "sealed" in create_result.lower():
-                        req.sessionId = 1  # First session
-                        logging.info(f"Created on-chain session, using ID {req.sessionId}")
-                    else:
-                        logging.warning(f"Session creation failed: {create_result}")
-            else:
-                logging.warning("get_account_status returned None")
-        except Exception as e:
-            logging.warning(f"Session auto-resolve failed: {e}")
-            import traceback
-            traceback.print_exc()
+    # Auto-resolve session ID: use off-chain session management
+    # On-chain sessions require multi-party signing (not yet implemented)
+    if req.sessionId not in session_messages:
+        # Create a new off-chain session for this ID
+        session_messages[req.sessionId] = []
+        logging.info(f"Auto-created off-chain session {req.sessionId}")
 
     logging.info(f"Session ID for this message: {req.sessionId}")
 
