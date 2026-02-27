@@ -88,7 +88,13 @@ transaction {
             signer.storage.save(<- agentStack, to: FlowClaw.FlowClawStoragePath)
         }
 
-        // 11. Auto-authorize owner as relay
+        // 11. Create Scheduler for task scheduling
+        if signer.storage.type(at: AgentScheduler.SchedulerStoragePath) == nil {
+            let scheduler <- AgentScheduler.createScheduler(agentId: 0)
+            signer.storage.save(<- scheduler, to: AgentScheduler.SchedulerStoragePath)
+        }
+
+        // 12. Auto-authorize owner as relay
         let oracleRef = signer.storage.borrow<auth(InferenceOracle.ManageRelays) &InferenceOracle.OracleConfig>(
             from: InferenceOracle.OracleConfigStoragePath
         )
