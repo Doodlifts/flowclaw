@@ -9,6 +9,7 @@ import {
   storeSigningKey,
   removeSigningKey,
   hasSigningKey,
+  signFlowPayload,
 } from "./transactionSigner";
 
 const AuthContext = createContext(null);
@@ -220,6 +221,56 @@ export function AuthProvider({ children }) {
       if (data.token) {
         localStorage.setItem("flowclaw_session_token", data.token);
         setSessionToken(data.token);
+      }
+
+      // Initialize FlowClaw resources on the USER's account via multi-party signing.
+      // This creates AgentCollection, SessionManager, ToolCollection, etc.
+      // Must happen before the user can create agents or sessions on-chain.
+      try {
+        const token = data.token;
+        const headers = {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        };
+
+        // Step 1: Build the unsigned setup transaction
+        const buildRes = await fetch(`${API_BASE}/transaction/build`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            transactionPath: "cadence/transactions/setup_full_account.cdc",
+            arguments: [],
+          }),
+        });
+
+        if (buildRes.ok) {
+          const buildData = await buildRes.json();
+
+          // Step 2: Sign with the user's new signing key
+          const userSignature = await signFlowPayload(buildData.payloadHex, data.address);
+
+          // Step 3: Submit — sponsor pays, user authorizes
+          const submitRes = await fetch(`${API_BASE}/transaction/submit`, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              txBuildId: buildData.txBuildId,
+              userSignature,
+            }),
+          });
+
+          if (submitRes.ok) {
+            const txResult = await submitRes.json();
+            console.log("FlowClaw resources initialized on-chain:", txResult.txId);
+          } else {
+            console.error("setup_full_account submit failed:", await submitRes.text());
+          }
+        } else {
+          console.error("setup_full_account build failed:", await buildRes.text());
+        }
+      } catch (err) {
+        console.error("FlowClaw on-chain setup failed:", err.message);
+        // Non-fatal — account is created, on-chain resources can be set up later
       }
 
       // Update state

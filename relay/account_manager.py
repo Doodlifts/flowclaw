@@ -151,11 +151,10 @@ class AccountManager:
 
             logger.info(f"Flow account created: {address}")
 
-            # Step 2: Initialize all FlowClaw resources
-            logger.info(f"Initializing FlowClaw resources for {address}")
-            agent_id = await self._initialize_flowclaw(address, display_name)
-
-            logger.info(f"FlowClaw initialized: agent #{agent_id}")
+            # Step 2: FlowClaw resource initialization (setup_full_account.cdc)
+            # is now handled by the frontend via multi-party signing, so it runs
+            # on the USER's account (not the sponsor's). Skip it here.
+            agent_id = 0
 
             # Step 3: Register account
             account = AccountInfo(
