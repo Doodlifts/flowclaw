@@ -25,7 +25,7 @@ const configs = {
     "flow.network": "mainnet",
     "app.detail.title": "FlowClaw",
     "app.detail.icon": "https://flowclaw.app/icon.png",
-    "0xFlowClaw": "", // Set after mainnet deploy
+    "0xFlowClaw": "0x91d0a5b7c9832a8b",
     "0xHybridCustody": "0xd8a7e05a7ac670c0",
     "0xCapabilityFactory": "0xd8a7e05a7ac670c0",
     "0xCapabilityFilter": "0xd8a7e05a7ac670c0",

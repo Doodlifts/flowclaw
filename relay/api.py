@@ -828,7 +828,7 @@ async def startup():
 
     # Initialize account manager and gas sponsor (for passkey onboarding)
     sponsor_address = os.getenv("GAS_SPONSOR_ADDRESS", config.flow_account_address)
-    sponsor_key_name = os.getenv("GAS_SPONSOR_KEY_NAME", "flowclawtest")
+    sponsor_key_name = os.getenv("GAS_SPONSOR_KEY_NAME", "flowclawmainnet" if config.flow_network == "mainnet" else "flowclawtest")
     account_manager = AccountManager(
         sponsor_address=sponsor_address,
         sponsor_key_name=sponsor_key_name,
@@ -1009,7 +1009,8 @@ def run_flow_tx(tx_path: str, args_json: str = None) -> Optional[str]:
             logging.warning(f"REST transaction failed, falling back to CLI: {e}")
 
     # Fallback to CLI (for emulator or if REST client not configured)
-    signer = "flowclawtest" if config.flow_network == "testnet" else "emulator-account"
+    signer_map = {"testnet": "flowclawtest", "mainnet": "flowclawmainnet"}
+    signer = signer_map.get(config.flow_network, "emulator-account")
     cmd = [
         "flow", "transactions", "send", tx_path,
         "--signer", signer,

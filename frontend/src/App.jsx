@@ -393,7 +393,7 @@ const ChatTab = () => {
                     <>
                       <span className="text-zinc-700">|</span>
                       {msg.onChain ? (
-                        <a href={getExplorerUrl("account", "0x808983d30a46aee2")} target="_blank" rel="noopener"
+                        <a href={getExplorerUrl("account", "0x91d0a5b7c9832a8b")} target="_blank" rel="noopener"
                           className="flex items-center gap-0.5 text-emerald-600 hover:text-emerald-400 transition">
                           <Lock size={9} /> on-chain <ExternalLink size={8} />
                         </a>

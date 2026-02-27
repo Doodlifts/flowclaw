@@ -11,6 +11,7 @@ import {
   Fingerprint, CheckCircle, Sparkles, Key
 } from "lucide-react";
 import { useAuth } from "./AuthContext";
+import { getExplorerUrl } from "./flow-config";
 
 const FeatureCard = ({ icon: Icon, title, description, color }) => (
   <div className="bg-zinc-900/80 backdrop-blur border border-zinc-800 rounded-2xl p-6 hover:border-zinc-700 transition group">
@@ -151,7 +152,7 @@ export default function LandingPage() {
             <span className="px-2 py-0.5 rounded-full text-xs bg-zinc-800 text-zinc-400">alpha</span>
           </div>
           <div className="flex items-center gap-3">
-            <a href="https://testnet.flowscan.io/account/0x808983d30a46aee2" target="_blank" rel="noopener"
+            <a href={getExplorerUrl("account", "0x91d0a5b7c9832a8b")} target="_blank" rel="noopener"
               className="text-xs text-zinc-500 hover:text-zinc-300 transition flex items-center gap-1">
               <Activity size={12} /> View on FlowScan
             </a>
@@ -433,7 +434,7 @@ export default function LandingPage() {
             <span>FlowClaw v0.2.0-alpha</span>
           </div>
           <div className="flex items-center gap-4">
-            <a href="https://testnet.flowscan.io/account/0x808983d30a46aee2" target="_blank" rel="noopener" className="hover:text-zinc-400 transition">
+            <a href={getExplorerUrl("account", "0x91d0a5b7c9832a8b")} target="_blank" rel="noopener" className="hover:text-zinc-400 transition">
               FlowScan
             </a>
             <a href="https://flow.com" target="_blank" rel="noopener" className="hover:text-zinc-400 transition">
