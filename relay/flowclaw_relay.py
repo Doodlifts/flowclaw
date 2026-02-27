@@ -247,7 +247,7 @@ class RelayConfig:
     openai_api_key: str = ""
     venice_api_key: str = ""
     venice_base_url: str = "https://api.venice.ai/api/v1"
-    ollama_base_url: str = "http://localhost:11434"
+    ollama_base_url: str = ""  # Only register ollama if OLLAMA_BASE_URL is explicitly set
 
     # Relay settings
     poll_interval: int = 2  # seconds
@@ -269,7 +269,7 @@ class RelayConfig:
             openai_api_key=os.getenv("OPENAI_API_KEY", ""),
             venice_api_key=os.getenv("VENICE_API_KEY", ""),
             venice_base_url=os.getenv("VENICE_BASE_URL", "https://api.venice.ai/api/v1"),
-            ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+            ollama_base_url=os.getenv("OLLAMA_BASE_URL", ""),
             poll_interval=int(os.getenv("RELAY_POLL_INTERVAL", "2")),
             max_retries=int(os.getenv("RELAY_MAX_RETRIES", "3")),
             log_level=os.getenv("RELAY_LOG_LEVEL", "INFO"),
