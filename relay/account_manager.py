@@ -23,6 +23,7 @@ import json
 import logging
 import subprocess
 import hashlib
+import hmac
 import secrets
 import time
 import base64
@@ -84,7 +85,16 @@ class AccountManager:
         # In-memory account registry (production: use a database)
         self.accounts: Dict[str, AccountInfo] = {}  # address -> AccountInfo
         self.credential_map: Dict[str, str] = {}  # credentialId -> address
-        self.session_tokens: Dict[str, Dict] = {}  # token -> { address, expiresAt }
+        self.session_tokens: Dict[str, Dict] = {}  # legacy in-memory store (fallback)
+        # HMAC secret for stateless JWT-like tokens (survives restarts)
+        # Use env var if available, otherwise generate a random one
+        import os
+        self._token_secret = os.getenv("FLOWCLAW_TOKEN_SECRET", "").encode("utf-8")
+        if not self._token_secret:
+            # Generate from sponsor address + key name for deterministic secret
+            self._token_secret = hashlib.sha256(
+                f"flowclaw-token-{sponsor_address}-{sponsor_key_name}".encode()
+            ).digest()
 
         # Rate limiting
         self._daily_creates = 0
@@ -233,18 +243,58 @@ class AccountManager:
     # ------------------------------------------------------------------
 
     def _issue_token(self, address: str, credential_id: str, ttl_hours: int = 24) -> str:
-        """Issue a simple session token. Production: use JWT with proper signing."""
-        token = secrets.token_urlsafe(48)
-        self.session_tokens[token] = {
-            "address": address,
-            "credentialId": credential_id,
-            "issuedAt": time.time(),
-            "expiresAt": time.time() + (ttl_hours * 3600),
-        }
+        """Issue a stateless HMAC-signed token that survives relay restarts.
+
+        Token format: base64url(address:credentialId:expiresAt:hmac)
+        The HMAC ensures the token can't be forged. No server-side storage needed.
+        """
+        expires_at = int(time.time() + (ttl_hours * 3600))
+        payload = f"{address}:{credential_id}:{expires_at}"
+        sig = hmac.new(self._token_secret, payload.encode("utf-8"), hashlib.sha256).hexdigest()
+        token_raw = f"{payload}:{sig}"
+        # Base64url encode for clean transport
+        token = base64.urlsafe_b64encode(token_raw.encode("utf-8")).decode("utf-8").rstrip("=")
         return token
 
     def verify_token(self, token: str) -> Optional[Dict]:
-        """Verify a session token. Returns token data or None."""
+        """Verify a stateless HMAC token. Returns token data or None.
+
+        Works across relay restarts — no in-memory state needed.
+        """
+        try:
+            # Decode base64url
+            padded = token + "=" * (4 - len(token) % 4)
+            token_raw = base64.urlsafe_b64decode(padded).decode("utf-8")
+            parts = token_raw.split(":")
+            if len(parts) != 4:
+                # Try legacy in-memory token
+                return self._verify_legacy_token(token)
+
+            address, credential_id, expires_at_str, sig = parts
+            expires_at = int(expires_at_str)
+
+            # Check expiry
+            if time.time() > expires_at:
+                return None
+
+            # Verify HMAC
+            payload = f"{address}:{credential_id}:{expires_at_str}"
+            expected_sig = hmac.new(self._token_secret, payload.encode("utf-8"), hashlib.sha256).hexdigest()
+            if not hmac.compare_digest(sig, expected_sig):
+                return None
+
+            return {
+                "address": address,
+                "credentialId": credential_id,
+                "issuedAt": expires_at - 86400,  # approximate
+                "expiresAt": expires_at,
+            }
+        except Exception:
+            # Fall back to legacy in-memory token check
+            return self._verify_legacy_token(token)
+
+    def _verify_legacy_token(self, token: str) -> Optional[Dict]:
+        """Check old-style in-memory tokens (for backward compat during migration)."""
         data = self.session_tokens.get(token)
         if not data:
             return None
