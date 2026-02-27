@@ -235,6 +235,17 @@ export const api = {
           }
         }
 
+        // Also notify relay cache so the scheduler page shows the task
+        try {
+          await fetch(`${API_BASE}/tasks/schedule`, {
+            method: 'POST',
+            headers: getAuthHeaders(),
+            body: JSON.stringify(task),
+          });
+        } catch (_) {
+          // Cache sync is best-effort; the task is already on-chain
+        }
+
         return { taskId: taskId ?? 0, success: true, onChain: true, txId: txResult.txId };
       } catch (err) {
         console.warn('Multi-party schedule_task failed, falling back to relay:', err.message);
@@ -244,7 +255,7 @@ export const api = {
     // Fallback: relay-only submission (sponsor acts as all roles)
     const res = await fetch(`${API_BASE}/tasks/schedule`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body: JSON.stringify(task),
     });
     return handleResponse(res);

@@ -120,6 +120,31 @@ extensions_cache: Dict[int, Dict] = {}  # Local cache for extension operations
 task_results: Dict[int, List[Dict]] = {}  # Task execution results cache
 _next_memory_id: int = 1
 _next_task_id: int = 1
+
+# Persistent storage path for tasks (survives relay restarts)
+_TASKS_PERSIST_PATH = os.path.expanduser("~/.flowclaw/tasks_cache.json")
+
+def _save_tasks_cache():
+    """Persist tasks_cache to disk."""
+    try:
+        os.makedirs(os.path.dirname(_TASKS_PERSIST_PATH), exist_ok=True)
+        with open(_TASKS_PERSIST_PATH, "w") as f:
+            json.dump({"tasks": tasks_cache, "next_id": _next_task_id}, f)
+    except Exception as e:
+        logging.warning(f"Failed to persist tasks cache: {e}")
+
+def _load_tasks_cache():
+    """Load tasks_cache from disk on startup."""
+    global tasks_cache, _next_task_id
+    try:
+        if os.path.exists(_TASKS_PERSIST_PATH):
+            with open(_TASKS_PERSIST_PATH, "r") as f:
+                data = json.load(f)
+            tasks_cache = {int(k): v for k, v in data.get("tasks", {}).items()}
+            _next_task_id = data.get("next_id", max(tasks_cache.keys(), default=0) + 1)
+            logging.info(f"Loaded {len(tasks_cache)} tasks from persistent cache")
+    except Exception as e:
+        logging.warning(f"Failed to load tasks cache: {e}")
 cognitive_engine: CognitiveMemoryEngine = CognitiveMemoryEngine()
 _next_hook_id: int = 1
 _next_extension_id: int = 1
@@ -603,6 +628,9 @@ async def startup():
             logging.info(f"Sub-agent {sub_id} ({name}) starting task: {task_description[:100]}")
             agents_cache[sub_id]["status"] = "running"
 
+            # Debug: log available providers for troubleshooting
+            logging.info(f"Sub-agent {sub_id} provider resolution: global_providers={list(providers.keys())}")
+
             # Resolve provider using the same logic as chat:
             # 1. Check user's BYOK provider (if user address is known)
             # 2. Check sub-agent's inherited provider name
@@ -613,13 +641,19 @@ async def startup():
             user_address = sub_entry.get("userAddress")
             provider_name = sub_entry.get("provider")
 
+            logging.info(f"Sub-agent {sub_id} context: userAddress={user_address}, provider={provider_name}, parentId={sub_entry.get('parentAgentId')}")
+
             # Try user's BYOK provider first (handles OpenAI, Anthropic, any custom provider)
             if user_address:
                 provider = _get_user_provider(user_address, provider_name)
+                if provider:
+                    logging.info(f"Sub-agent {sub_id} using BYOK provider for {user_address}")
 
             # Fall back to named provider in global dict
             if not provider and provider_name and provider_name in providers:
                 provider = providers[provider_name]
+                if provider:
+                    logging.info(f"Sub-agent {sub_id} using named global provider: {provider_name}")
 
             # Fall back to parent agent's provider
             if not provider:
@@ -628,14 +662,18 @@ async def startup():
                     parent_provider_name = agents_cache[parent_id].get("provider")
                     if parent_provider_name and parent_provider_name in providers:
                         provider = providers[parent_provider_name]
+                        logging.info(f"Sub-agent {sub_id} using parent's provider: {parent_provider_name}")
 
             # Last resort: first available global provider
             if not provider and providers:
-                provider = list(providers.values())[0]
+                first_name = list(providers.keys())[0]
+                provider = providers[first_name]
+                logging.info(f"Sub-agent {sub_id} using fallback global provider: {first_name}")
 
             if not provider:
+                logging.error(f"Sub-agent {sub_id} NO provider found. Global providers dict is empty!")
                 agents_cache[sub_id]["status"] = "error"
-                agents_cache[sub_id]["lastResult"] = "No LLM provider configured"
+                agents_cache[sub_id]["lastResult"] = "No LLM provider configured. Available providers: " + str(list(providers.keys()))
                 return
 
             # Build system prompt with tools
@@ -842,11 +880,30 @@ async def startup():
 
         # Kick off the sub-agent's task in the background
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             loop.create_task(_run_sub_agent_task(sub_id, name, description))
-            logging.info(f"Sub-agent {sub_id} background task queued")
+            logging.info(f"Sub-agent {sub_id} background task queued via running loop")
+        except RuntimeError:
+            # No running loop — likely called from a sync context
+            # Fall back to creating a new task via thread-safe method
+            try:
+                import concurrent.futures
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    loop.create_task(_run_sub_agent_task(sub_id, name, description))
+                    logging.info(f"Sub-agent {sub_id} background task queued via event loop")
+                else:
+                    logging.warning(f"Sub-agent {sub_id}: event loop not running, task may not execute")
+                    agents_cache[sub_id]["status"] = "error"
+                    agents_cache[sub_id]["lastResult"] = "Could not schedule background task — event loop not running"
+            except Exception as e2:
+                logging.error(f"Sub-agent {sub_id} task scheduling failed completely: {e2}")
+                agents_cache[sub_id]["status"] = "error"
+                agents_cache[sub_id]["lastResult"] = f"Task scheduling error: {e2}"
         except Exception as e:
             logging.warning(f"Could not queue sub-agent task: {e}")
+            agents_cache[sub_id]["status"] = "error"
+            agents_cache[sub_id]["lastResult"] = f"Could not start task: {e}"
 
         return {"agentId": sub_id, "parentId": parent_id, "success": True}
 
@@ -921,6 +978,9 @@ async def startup():
 
     logging.info(f"  Encryption: {'ENABLED' if encryption.is_configured else 'DISABLED'}")
     logging.info(f"  Providers: {list(providers.keys())}")
+
+    # Load persistent caches
+    _load_tasks_cache()
 
     # Start background task executor
     asyncio.create_task(background_task_executor())
@@ -2708,6 +2768,7 @@ async def schedule_task(req: ScheduleTaskRequest):
                 "executionCount": 0,
             }
             _next_task_id += 1
+            _save_tasks_cache()
             logging.info(f"Task scheduled: ID={task_id}, name={req.name}")
             return TaskScheduleResponse(taskId=task_id, success=True)
         else:
