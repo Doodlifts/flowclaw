@@ -2,7 +2,9 @@
 *.pkey
 .env
 */.env
+*/.env.production
 frontend/.env
+frontend/.env.production
 relay/.env
 
 # Python
