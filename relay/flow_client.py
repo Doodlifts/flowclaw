@@ -161,13 +161,15 @@ def _build_envelope_rlp(
     return rlp_encode(envelope)
 
 
-def _sign_message(message: bytes, private_key_hex: str) -> bytes:
+def _sign_message(message: bytes, private_key_hex: str, sig_algo: str = "ECDSA_P256", hash_algo: str = "SHA3_256") -> bytes:
     """
-    Sign a message using ECDSA_P256 + SHA3_256.
+    Sign a message using the specified signature and hash algorithms.
 
     Args:
         message: Domain tag + RLP-encoded payload/envelope
-        private_key_hex: P256 private key as hex string
+        private_key_hex: Private key as hex string
+        sig_algo: "ECDSA_P256" or "ECDSA_secp256k1"
+        hash_algo: "SHA3_256" or "SHA2_256"
 
     Returns:
         Raw signature bytes (r || s), 64 bytes
@@ -178,15 +180,17 @@ def _sign_message(message: bytes, private_key_hex: str) -> bytes:
             "Install it: pip3 install cryptography"
         )
 
-    # Load the private key
+    # Load the private key with the correct curve
     private_key_int = int(private_key_hex, 16)
-    private_key = ec.derive_private_key(private_key_int, ec.SECP256R1())
+    curve = ec.SECP256K1() if sig_algo == "ECDSA_secp256k1" else ec.SECP256R1()
+    private_key = ec.derive_private_key(private_key_int, curve)
 
-    # Sign directly — let the library handle SHA3-256 hashing internally.
-    # This avoids potential issues with Prehashed + SHA3 in some OpenSSL builds.
+    # Select hash algorithm
+    hash_algorithm = hashes.SHA256() if hash_algo == "SHA2_256" else hashes.SHA3_256()
+
     signature_der = private_key.sign(
         message,
-        ec.ECDSA(hashes.SHA3_256())
+        ec.ECDSA(hash_algorithm)
     )
 
     # Decode DER signature to (r, s) integers
@@ -273,15 +277,19 @@ class FlowRESTClient:
         signer_private_key_hex: Optional[str] = None,
         signer_key_index: int = 0,
         default_gas_limit: int = 9999,
+        sig_algo: str = "ECDSA_P256",
+        hash_algo: str = "SHA3_256",
     ):
         """
         Args:
             network: Flow network name (testnet, mainnet, emulator)
             access_node: Override access node URL
             signer_address: Default signer/payer Flow address
-            signer_private_key_hex: Default signer's P256 private key (hex)
-            signer_key_index: Default signer's key index (usually 0)
+            signer_private_key_hex: Default signer's private key (hex)
+            signer_key_index: Default signer's key index
             default_gas_limit: Default gas limit for transactions
+            sig_algo: Signature algorithm ("ECDSA_P256" or "ECDSA_secp256k1")
+            hash_algo: Hash algorithm ("SHA3_256" or "SHA2_256")
         """
         self.network = network
         self.access_node = access_node or self.ACCESS_NODES.get(network, self.ACCESS_NODES["testnet"])
@@ -289,6 +297,8 @@ class FlowRESTClient:
         self.signer_private_key_hex = signer_private_key_hex
         self.signer_key_index = signer_key_index
         self.default_gas_limit = default_gas_limit
+        self.sig_algo = sig_algo
+        self.hash_algo = hash_algo
         self.contract_aliases: Dict[str, str] = {}  # contract name -> address
 
         self._session = requests.Session()
@@ -561,7 +571,7 @@ class FlowRESTClient:
             envelope_fields = [payload_fields, payload_signatures]
             envelope_rlp = rlp_encode(envelope_fields)
             envelope_message = TRANSACTION_DOMAIN_TAG + envelope_rlp
-            envelope_sig = _sign_message(envelope_message, self.signer_private_key_hex)
+            envelope_sig = _sign_message(envelope_message, self.signer_private_key_hex, self.sig_algo, self.hash_algo)
 
             envelope_signatures = [
                 [0, proposer_key_idx, envelope_sig]  # signer index 0
@@ -570,7 +580,7 @@ class FlowRESTClient:
             # Multi-signer: sign payload for proposer/authorizers, envelope for payer
             payload_rlp = rlp_encode(payload_fields)
             payload_message = TRANSACTION_DOMAIN_TAG + payload_rlp
-            payload_sig = _sign_message(payload_message, self.signer_private_key_hex)
+            payload_sig = _sign_message(payload_message, self.signer_private_key_hex, self.sig_algo, self.hash_algo)
 
             signer_index = _get_signer_index(
                 _address_bytes(self.signer_address),
@@ -587,7 +597,7 @@ class FlowRESTClient:
             envelope_fields = [payload_fields, payload_signatures]
             envelope_rlp = rlp_encode(envelope_fields)
             envelope_message = TRANSACTION_DOMAIN_TAG + envelope_rlp
-            envelope_sig = _sign_message(envelope_message, self.signer_private_key_hex)
+            envelope_sig = _sign_message(envelope_message, self.signer_private_key_hex, self.sig_algo, self.hash_algo)
 
             payer_signer_index = _get_signer_index(
                 payer_bytes,

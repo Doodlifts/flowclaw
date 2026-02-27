@@ -581,12 +581,24 @@ async def startup():
     tool_executor = ToolExecutor(config, flow_cli)
 
     # Initialize Flow REST client (replaces CLI subprocess calls)
+    # Mainnet uses Key 1 (secp256k1 + SHA2_256), testnet/emulator use Key 0 (P256 + SHA3_256)
+    if config.flow_network == "mainnet":
+        _key_index = 1
+        _sig_algo = "ECDSA_secp256k1"
+        _hash_algo = "SHA2_256"
+    else:
+        _key_index = 0
+        _sig_algo = "ECDSA_P256"
+        _hash_algo = "SHA3_256"
+
     flow_rest_client = FlowRESTClient(
         network=config.flow_network,
         access_node=config.flow_access_node if config.flow_access_node != "http://localhost:8888" else None,
         signer_address=config.flow_account_address,
         signer_private_key_hex=config.flow_private_key,
-        signer_key_index=0,
+        signer_key_index=_key_index,
+        sig_algo=_sig_algo,
+        hash_algo=_hash_algo,
     )
     # Load contract aliases from flow.json so REST API can resolve bare imports
     flow_json_path = os.path.join(config.project_dir, "flow.json")
