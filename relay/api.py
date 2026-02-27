@@ -1169,6 +1169,7 @@ async def get_status():
         "connected": emulator_ok,
         "network": config.flow_network,
         "encryptionEnabled": encryption.is_configured if encryption else False,
+        "encryptionFingerprint": encryption.fingerprint if encryption and encryption.is_configured else None,
         "availableProviders": list(providers.keys()),
         "uptime": round(time.time() - start_time, 1),
         "byokEnabled": True,

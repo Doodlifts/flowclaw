@@ -233,40 +233,45 @@ export function AuthProvider({ children }) {
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         };
 
-        // Step 1: Build the unsigned setup transaction
-        const buildRes = await fetch(`${API_BASE}/transaction/build`, {
-          method: "POST",
-          headers,
-          body: JSON.stringify({
-            transactionPath: "cadence/transactions/setup_full_account.cdc",
-            arguments: [],
-          }),
-        });
-
-        if (buildRes.ok) {
+        // Helper: build, sign, and submit a multi-party transaction
+        const signAndSubmit = async (txPath, args = []) => {
+          const buildRes = await fetch(`${API_BASE}/transaction/build`, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({ transactionPath: txPath, arguments: args }),
+          });
+          if (!buildRes.ok) throw new Error(`Build failed for ${txPath}: ${await buildRes.text()}`);
           const buildData = await buildRes.json();
-
-          // Step 2: Sign with the user's new signing key
-          const userSignature = await signFlowPayload(buildData.payloadHex, data.address);
-
-          // Step 3: Submit — sponsor pays, user authorizes
+          const sig = await signFlowPayload(buildData.payloadHex, data.address);
           const submitRes = await fetch(`${API_BASE}/transaction/submit`, {
             method: "POST",
             headers,
-            body: JSON.stringify({
-              txBuildId: buildData.txBuildId,
-              userSignature,
-            }),
+            body: JSON.stringify({ txBuildId: buildData.txBuildId, userSignature: sig }),
           });
+          if (!submitRes.ok) throw new Error(`Submit failed for ${txPath}: ${await submitRes.text()}`);
+          return submitRes.json();
+        };
 
-          if (submitRes.ok) {
-            const txResult = await submitRes.json();
-            console.log("FlowClaw resources initialized on-chain:", txResult.txId);
-          } else {
-            console.error("setup_full_account submit failed:", await submitRes.text());
+        // Step 1: Initialize all FlowClaw resources on the user's account
+        const txResult = await signAndSubmit("cadence/transactions/setup_full_account.cdc");
+        console.log("FlowClaw resources initialized on-chain:", txResult.txId);
+
+        // Step 2: Register the relay's encryption key fingerprint on the user's account.
+        // Without this, on-chain message storage fails with "Payload encrypted with unknown key"
+        // because the user's EncryptionConfig doesn't recognize the relay's key.
+        try {
+          const statusRes = await fetch(`${API_BASE}/status`);
+          const status = await statusRes.json();
+          if (status.encryptionFingerprint) {
+            const encResult = await signAndSubmit("cadence/transactions/configure_encryption.cdc", [
+              { type: "String", value: status.encryptionFingerprint },
+              { type: "UInt8", value: "0" },
+              { type: "String", value: "relay-key" },
+            ]);
+            console.log("Encryption key registered on user account:", encResult.txId);
           }
-        } else {
-          console.error("setup_full_account build failed:", await buildRes.text());
+        } catch (encErr) {
+          console.error("Encryption key registration failed:", encErr.message);
         }
       } catch (err) {
         console.error("FlowClaw on-chain setup failed:", err.message);

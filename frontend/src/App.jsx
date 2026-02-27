@@ -1431,6 +1431,8 @@ const SettingsTab = () => {
   const [showAddForm, setShowAddForm] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [modelsByProvider, setModelsByProvider] = useState({}); // { providerName: [model, ...] }
+  const [loadingModels, setLoadingModels] = useState({});
 
   // Add form state
   const [formPreset, setFormPreset] = useState("venice");
@@ -1453,6 +1455,31 @@ const SettingsTab = () => {
   };
 
   useEffect(() => { loadProviders(); }, []);
+
+  const loadModelsForProvider = async (providerName) => {
+    if (modelsByProvider[providerName] || loadingModels[providerName]) return;
+    setLoadingModels(prev => ({ ...prev, [providerName]: true }));
+    try {
+      const data = await api.getProviderModels(providerName);
+      setModelsByProvider(prev => ({ ...prev, [providerName]: data.models || [] }));
+    } catch (e) {
+      console.warn(`Failed to load models for ${providerName}:`, e);
+      setModelsByProvider(prev => ({ ...prev, [providerName]: [] }));
+    } finally {
+      setLoadingModels(prev => ({ ...prev, [providerName]: false }));
+    }
+  };
+
+  const handleSetDefaultModel = async (providerName, modelId) => {
+    try {
+      await api.setDefaultProvider(providerName, modelId);
+      setSuccess(`Default model set to "${modelId}"`);
+      await loadProviders();
+      setTimeout(() => setSuccess(""), 3000);
+    } catch (e) {
+      setError(e.message);
+    }
+  };
 
   const handlePresetChange = (preset) => {
     setFormPreset(preset);
@@ -1556,24 +1583,69 @@ const SettingsTab = () => {
         ) : (
           <div className="space-y-2">
             {providers.map((p) => (
-              <div key={p.name} className="flex items-center justify-between bg-zinc-800/50 rounded-lg p-3 group">
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-zinc-200">{p.name}</span>
-                    {p.is_default && <span className="text-[10px] px-1.5 py-0.5 bg-teal-600/30 text-teal-400 rounded">default</span>}
-                    <span className="text-[10px] px-1.5 py-0.5 bg-zinc-700 text-zinc-400 rounded">{p.type}</span>
+              <div key={p.name} className="bg-zinc-800/50 rounded-lg p-3 group">
+                <div className="flex items-center justify-between">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-zinc-200">{p.name}</span>
+                      {p.is_default && <span className="text-[10px] px-1.5 py-0.5 bg-teal-600/30 text-teal-400 rounded">default</span>}
+                      <span className="text-[10px] px-1.5 py-0.5 bg-zinc-700 text-zinc-400 rounded">{p.type}</span>
+                    </div>
+                    <div className="text-xs text-zinc-500 mt-0.5 font-mono">{p.api_key}</div>
                   </div>
-                  <div className="text-xs text-zinc-500 mt-0.5 font-mono">{p.api_key}</div>
-                </div>
-                <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                  {!p.is_default && (
-                    <button onClick={() => handleSetDefault(p.name)} className="text-xs px-2 py-1 text-teal-400 hover:bg-teal-600/20 rounded" title="Set as default">
-                      <Star size={12} />
+                  <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    {!p.is_default && (
+                      <button onClick={() => handleSetDefault(p.name)} className="text-xs px-2 py-1 text-teal-400 hover:bg-teal-600/20 rounded" title="Set as default">
+                        <Star size={12} />
+                      </button>
+                    )}
+                    <button onClick={() => handleDelete(p.name)} className="text-xs px-2 py-1 text-red-400 hover:bg-red-600/20 rounded" title="Remove">
+                      <Trash2 size={12} />
                     </button>
+                  </div>
+                </div>
+                {/* Model Selection */}
+                <div className="mt-2 pt-2 border-t border-zinc-700/50">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-zinc-500">Model:</span>
+                    {p.default_model ? (
+                      <span className="text-xs text-zinc-300 font-mono">{p.default_model}</span>
+                    ) : (
+                      <span className="text-xs text-zinc-600 italic">auto</span>
+                    )}
+                    <button
+                      onClick={() => loadModelsForProvider(p.name)}
+                      className="text-xs px-2 py-0.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-700 rounded transition-colors ml-auto"
+                    >
+                      {loadingModels[p.name] ? <Loader2 size={10} className="animate-spin" /> : <ChevronDown size={10} />}
+                      <span className="ml-1">Models</span>
+                    </button>
+                  </div>
+                  {modelsByProvider[p.name] && modelsByProvider[p.name].length > 0 && (
+                    <div className="mt-2 max-h-40 overflow-y-auto space-y-0.5">
+                      {modelsByProvider[p.name].map((m) => {
+                        const modelId = typeof m === "string" ? m : m.id || m.name;
+                        const isSelected = p.default_model === modelId;
+                        return (
+                          <button
+                            key={modelId}
+                            onClick={() => handleSetDefaultModel(p.name, modelId)}
+                            className={`w-full text-left text-xs px-2 py-1 rounded transition-colors ${
+                              isSelected
+                                ? "bg-teal-600/20 text-teal-300 border border-teal-600/30"
+                                : "text-zinc-400 hover:bg-zinc-700 hover:text-zinc-200"
+                            }`}
+                          >
+                            <span className="font-mono">{modelId}</span>
+                            {isSelected && <CheckCircle size={10} className="inline ml-1" />}
+                          </button>
+                        );
+                      })}
+                    </div>
                   )}
-                  <button onClick={() => handleDelete(p.name)} className="text-xs px-2 py-1 text-red-400 hover:bg-red-600/20 rounded" title="Remove">
-                    <Trash2 size={12} />
-                  </button>
+                  {modelsByProvider[p.name] && modelsByProvider[p.name].length === 0 && (
+                    <div className="mt-1 text-xs text-zinc-600">No models found — check API key and endpoint</div>
+                  )}
                 </div>
               </div>
             ))}

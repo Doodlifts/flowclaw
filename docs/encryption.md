@@ -64,7 +64,7 @@ FlowClaw uses **XChaCha20-Poly1305** — the same authenticated encryption schem
 - Poly1305 MAC for authentication
 - SHA-256 of the plaintext stored alongside for integrity verification after decryption
 
-**Library priority:** PyNaCl (libsodium bindings) → `cryptography` library → XOR fallback (development only, not secure)
+**Library priority:** PyNaCl (libsodium bindings) → `cryptography` library (a proper crypto library is required — no insecure fallbacks)
 
 ## Key Management
 
@@ -99,26 +99,25 @@ If you lose your encryption key, your on-chain messages become permanently unrea
 
 ## Encrypted Flow Step by Step
 
-### Sending a message
+### Sending a message (Multi-Party Signing)
 
-1. You type "What is FLOW?" in your client
-2. Relay encrypts: `encrypt("What is FLOW?")` → `{ciphertext: "x7Fk...", nonce: "abc...", plaintextHash: "a3b8...", ...}`
-3. Relay submits `send_message.cdc` with encrypted fields
-4. On-chain: `AgentSession` stores the ciphertext as the message content, and the plaintextHash as contentHash
-5. On-chain: `EncryptionConfig.verifyPayload()` confirms the key fingerprint is recognized
-6. On-chain: `InferenceRequested` event emits with `contentHash` (the plaintext hash, not the content)
+FlowClaw uses multi-party signing where the user is the authorizer and the sponsor pays gas. Encryption happens at the relay before the user signs the transaction:
+
+1. You type "What is FLOW?" in the web UI
+2. Your browser calls `POST /encrypt` on the relay — the relay encrypts with XChaCha20-Poly1305 and returns the encrypted payload
+3. Your browser calls `POST /transaction/build` with the **ciphertext** as the transaction argument
+4. The relay builds a `send_message.cdc` transaction with you as proposer + authorizer and the sponsor as payer
+5. Your browser signs the transaction payload with your SubtleCrypto P-256 key
+6. Your browser calls `POST /transaction/submit` — the relay adds the sponsor's envelope signature and submits to Flow
+7. On-chain: `AgentSession` stores the ciphertext on **your account**, `InferenceRequested` event fires with contentHash
+
+The plaintext never enters a transaction argument. The relay encrypts, the user signs, the sponsor pays.
 
 ### Receiving a response
 
-1. Relay polls for `InferenceRequested` events
-2. Relay fetches session history from chain (all ciphertext)
-3. Relay decrypts each message locally
-4. Relay calls LLM with plaintext messages
-5. LLM responds with plaintext
-6. Relay encrypts: `encrypt("FLOW is a layer-1...")` → `{ciphertext: "kR8p...", ...}`
-7. Relay submits `complete_inference_owner.cdc` with encrypted response fields
-8. On-chain: encrypted response stored, `InferenceCompleted` event fires with responseHash
-9. Relay decrypts and displays the response to you
+1. The relay calls your configured LLM provider (BYOK) with the plaintext
+2. The LLM responds — the relay displays it immediately in the UI
+3. On-chain response posting uses the same encrypt → build → sign → submit flow
 
 ### Storing memory
 
@@ -162,11 +161,7 @@ The relay automatically detects the key at startup and logs whether encryption i
 2025-02-17 10:00:00 [INFO] Encryption: ENABLED
 ```
 
-If no key is found, the relay warns you and falls back to plaintext (for development only):
-
-```
-2025-02-17 10:00:00 [WARNING] ⚠ Encryption is NOT configured. Messages will be visible on-chain!
-```
+If no key is found, the relay auto-generates one at startup and registers its fingerprint on-chain. Encryption is always required for on-chain content — the relay refuses to store unencrypted data on-chain.
 
 ## Threat Model
 

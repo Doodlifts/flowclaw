@@ -1,6 +1,6 @@
 # Contract Reference
 
-FlowClaw deploys 10 Cadence contracts. Each contract manages a specific concern and uses Cadence's entitlement system for fine-grained access control.
+FlowClaw deploys 11 Cadence contracts on Flow mainnet (`0x91d0a5b7c9832a8b`) and testnet (`0x808983d30a46aee2`). Each contract manages a specific concern and uses Cadence's entitlement system for fine-grained access control.
 
 ## AgentRegistry
 

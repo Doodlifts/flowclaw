@@ -8,53 +8,50 @@ LLM inference can't run on-chain. It requires external API calls to providers li
 
 The hybrid split gives you the best of both worlds: blockchain-grade ownership and verifiability for state, with the flexibility and performance of off-chain compute for inference.
 
-## Data Flow
+## Data Flow (Multi-Party Signing)
+
+FlowClaw uses multi-party transaction signing. The user's browser signs as the authorizer (the account where resources live), and the relay signs as the payer (covering gas fees). Encryption happens at the relay before the transaction is built.
 
 ```
-                    YOUR MACHINE                              FLOW BLOCKCHAIN
-              ┌─────────────────────┐                   ┌─────────────────────┐
-              │                     │                   │                     │
-  User ──────►│  Channel Adapter    │                   │                     │
-  (CLI/Web/   │  (Telegram, TUI,   │                   │                     │
-   Telegram)  │   Web UI)          │                   │                     │
-              │       │            │                   │                     │
-              │       ▼            │                   │                     │
-              │  ┌────────────┐   │    Encrypted Tx   │  ┌───────────────┐  │
-              │  │ Encryption │───┼───────────────────►│  │ AgentSession  │  │
-              │  │  Manager   │   │                   │  │ (stores       │  │
-              │  └────────────┘   │                   │  │  ciphertext)  │  │
-              │       │           │                   │  └───────┬───────┘  │
-              │       │           │                   │          │          │
-              │       │           │    Event fires    │          ▼          │
-              │       │           │◄──────────────────│  InferenceRequested │
-              │       ▼           │                   │    (hash only)      │
-              │  ┌────────────┐   │                   │                     │
-              │  │ Decrypt    │   │                   │                     │
-              │  │ history    │   │                   │                     │
-              │  └────────────┘   │                   │                     │
-              │       │           │                   │                     │
-              │       ▼           │                   │                     │
-              │  ┌────────────┐   │                   │                     │
-              │  │ LLM Call   │   │                   │                     │
-              │  │ (Anthropic │   │                   │                     │
-              │  │  OpenAI,   │   │                   │                     │
-              │  │  Ollama)   │   │                   │                     │
-              │  └────────────┘   │                   │                     │
-              │       │           │                   │                     │
-              │       ▼           │                   │                     │
-              │  ┌────────────┐   │    Encrypted Tx   │  ┌───────────────┐  │
-              │  │ Encrypt    │───┼───────────────────►│  │ AgentSession  │  │
-              │  │ response   │   │                   │  │ (stores       │  │
-              │  └────────────┘   │                   │  │  ciphertext)  │  │
-              │       │           │                   │  └───────────────┘  │
-              │       ▼           │                   │                     │
-              │  Display to user  │                   │                     │
-              └─────────────────────┘                   └─────────────────────┘
+  BROWSER                          RELAY                        FLOW BLOCKCHAIN
+  ───────                          ─────                        ───────────────
+
+  User types message
+       │
+       ├──── POST /chat/send ─────►│ Call LLM (BYOK) ──► Provider
+       │     (plaintext to relay)  │ Get response        (Anthropic/
+       │                           │◄────────────────     OpenAI/
+       │◄── Response (plaintext) ──┤                     Venice/
+       │                           │                     Ollama)
+       │     Display to user       │
+       │                           │
+       ├──── POST /encrypt ───────►│ XChaCha20-Poly1305
+       │     (plaintext)           │ encrypt
+       │◄── Encrypted payload ─────┤
+       │     (ciphertext, nonce,   │
+       │      hash, fingerprint)   │
+       │                           │
+       ├──── POST /tx/build ──────►│ Build RLP payload
+       │     (ciphertext as args)  │ User = proposer +
+       │◄── payloadHex ────────────┤ authorizer
+       │                           │ Sponsor = payer
+       │                           │
+       │  Sign payload locally     │
+       │  (SubtleCrypto P-256,     │
+       │   SHA2-256)               │
+       │                           │
+       ├──── POST /tx/submit ─────►│ Add sponsor sig ──────► Flow REST API
+       │     (user signature)      │ (SHA3-256)               Verify both sigs
+       │◄── TX result ─────────────┤◄─────────────────────── Execute on user's
+       │                           │                          account
+       │                           │
+  On-chain: ciphertext stored      │
+  in YOUR account's session        │
 ```
 
 ## On-Chain Components
 
-Each Flow account that runs FlowClaw gets 10 Cadence Resources stored in its private `/storage/`:
+Each Flow account that runs FlowClaw gets 12 Cadence Resources stored in its private `/storage/`:
 
 **AgentRegistry.Agent** — The core identity. Holds inference config (provider, model, API key hash, max tokens, temperature, system prompt), security policy (autonomy level, rate limits, cost caps, allowed/denied tools), and usage stats. This is the "who am I and what am I allowed to do" of your agent.
 
@@ -80,7 +77,11 @@ Each Flow account that runs FlowClaw gets 10 Cadence Resources stored in its pri
 
 **Inference Relay** (`flowclaw_relay.py`) — A Python process that runs on your machine. It polls the Flow Access Node for `InferenceRequested` events, decrypts the message history, calls the configured LLM provider, encrypts the response, and posts it back on-chain. Each relay instance serves exactly one Flow account.
 
-**Encryption Manager** — Handles XChaCha20-Poly1305 encryption and decryption. The 256-bit key is generated locally and stored at `~/.flowclaw/encryption.key`. Supports PyNaCl (preferred), the `cryptography` library (fallback), and a development-only XOR placeholder.
+**Encryption Manager** — Handles XChaCha20-Poly1305 encryption and decryption. The 256-bit key is generated locally and stored at `~/.flowclaw/encryption.key`. Requires PyNaCl (preferred) or the `cryptography` library. Exposes a `POST /encrypt` endpoint so the frontend can encrypt content before building multi-party signed transactions — ensuring plaintext never enters a transaction argument.
+
+**Gas Sponsor** — Pays transaction fees for user accounts. Tracks daily limits per account to prevent abuse. The sponsor is the payer in multi-party signed transactions but never the authorizer — it can't access user resources.
+
+**Account Manager** — Handles passkey (WebAuthn) account creation and authentication. Creates Flow accounts with the user's P-256 public key. Issues stateless HMAC session tokens that survive relay restarts.
 
 **Tool Executor** — Runs tool calls in a sandboxed environment. Dangerous commands (rm -rf, sudo, etc.) are denied. Tool results are fed back into the LLM for multi-turn agentic loops (up to 10 turns).
 
