@@ -194,6 +194,54 @@ export const api = {
 
   // Tasks
   async scheduleTask(task) {
+    // Try multi-party signing first (user = authorizer, sponsor = payer)
+    const address = localStorage.getItem('flowclaw_address');
+    const token = localStorage.getItem('flowclaw_session_token');
+    if (address && token && hasSigningKey(address)) {
+      try {
+        // Build Cadence-typed arguments for schedule_task.cdc
+        const executeAtStr = (task.executeAt || Math.floor(Date.now() / 1000) + 60).toFixed(8);
+        const args = [
+          { type: 'String', value: task.name },
+          { type: 'String', value: task.description || '' },
+          { type: 'UInt8', value: String(task.category || 0) },
+          { type: 'String', value: task.prompt },
+          { type: 'UInt64', value: String(task.maxTurns || 10) },
+          { type: 'UInt8', value: String(task.priority || 0) },
+          { type: 'UFix64', value: executeAtStr },
+          { type: 'Bool', value: task.isRecurring || false },
+          task.intervalSeconds
+            ? { type: 'Optional', value: { type: 'UFix64', value: task.intervalSeconds.toFixed(8) } }
+            : { type: 'Optional', value: null },
+          task.maxExecutions
+            ? { type: 'Optional', value: { type: 'UInt64', value: String(task.maxExecutions) } }
+            : { type: 'Optional', value: null },
+        ];
+
+        const txResult = await this.signAndSubmitTransaction(
+          'cadence/transactions/schedule_task.cdc',
+          args
+        );
+
+        // Extract task ID from event if available
+        let taskId = null;
+        if (txResult.events && Array.isArray(txResult.events)) {
+          const taskEvent = txResult.events.find(e =>
+            e.type && e.type.includes('TaskScheduled')
+          );
+          if (taskEvent?.payload?.value?.fields) {
+            const idField = taskEvent.payload.value.fields.find(f => f.name === 'taskId');
+            if (idField) taskId = parseInt(idField.value?.value, 10);
+          }
+        }
+
+        return { taskId: taskId ?? 0, success: true, onChain: true, txId: txResult.txId };
+      } catch (err) {
+        console.warn('Multi-party schedule_task failed, falling back to relay:', err.message);
+      }
+    }
+
+    // Fallback: relay-only submission (sponsor acts as all roles)
     const res = await fetch(`${API_BASE}/tasks/schedule`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

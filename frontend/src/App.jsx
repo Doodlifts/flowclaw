@@ -571,12 +571,12 @@ const DashboardTab = () => {
               <span className="text-zinc-300">{stats?.version || "0.1.0-alpha"}</span>
             </div>
             <div className="flex justify-between text-sm">
-              <span className="text-zinc-500">Storage</span>
-              <code className="text-emerald-400 bg-zinc-800 px-2 py-0.5 rounded text-xs">/storage/FlowClawStack</code>
+              <span className="text-zinc-500">Agents</span>
+              <span className="text-zinc-300">{stats?.totalAgents ?? 0} registered</span>
             </div>
             <div className="flex justify-between text-sm">
-              <span className="text-zinc-500">Contracts</span>
-              <span className="text-zinc-300">10 deployed</span>
+              <span className="text-zinc-500">Memory</span>
+              <span className="text-zinc-300">{cogStats?.totalMemories ?? 0} memories ({cogStats?.totalBonds ?? 0} bonds)</span>
             </div>
             <div className="flex justify-between text-sm">
               <span className="text-zinc-500">Chain</span>
