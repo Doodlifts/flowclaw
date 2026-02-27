@@ -116,8 +116,8 @@ _active_agent_per_user: Dict[str, Optional[int]] = {}
 # Per-agent user address mapping: agent_id -> user address (multi-user safe)
 _agent_user_map: Dict[int, str] = {}
 # Session owner mapping: session_id -> user_address (for filtering sessions by user)
-_session_owners: Dict[int, str] = {}
-session_messages: Dict[int, List[Dict]] = {}  # Local cache for PoC
+_session_owners: Dict[str, str] = {}  # session UUID -> user address
+session_messages: Dict[str, List[Dict]] = {}  # Keyed by UUID string — user-isolated
 _sessions_with_system_prompt: set = set()  # Track which sessions have had system prompt injected
 _run_sub_agent_task_fn = None  # Set during startup(); used by canvas spawn endpoint
 memory_cache: Dict[int, Dict] = {}  # Local cache for memory operations
@@ -254,7 +254,7 @@ def _get_user_provider(address: str, provider_name: str = None) -> Optional[LLMP
 # -----------------------------------------------------------------------
 
 class SendMessageRequest(BaseModel):
-    sessionId: int
+    sessionId: str  # UUID string — unique per session, no cross-user collisions
     content: str
     provider: str = ""  # empty = use user's default provider
     model: str = ""     # empty = use provider's default model
@@ -264,7 +264,7 @@ class CreateSessionRequest(BaseModel):
 
 class SendMessageResponse(BaseModel):
     requestId: int
-    sessionId: int
+    sessionId: str
     response: str
     tokensUsed: int
     turns: int
@@ -516,7 +516,7 @@ async def background_task_executor():
                     )
 
                     # Post result to the "Automated Tasks" session (session ID -1)
-                    auto_session_id = -1
+                    auto_session_id = "__automated__"
                     if auto_session_id not in session_messages:
                         session_messages[auto_session_id] = [{
                             "role": "system",
@@ -868,7 +868,7 @@ async def startup():
                 logging.warning(f"Sub-agent memory storage failed: {mem_err}")
 
             # Post to automated session feed (session -1)
-            auto_session_id = -1
+            auto_session_id = "__automated__"
             if auto_session_id not in session_messages:
                 session_messages[auto_session_id] = [{
                     "role": "system",
@@ -1232,12 +1232,13 @@ async def sync_sessions():
         logging.info(f"Synced sessions from on-chain: {str(parsed)[:200]}")
 
         # Populate session_messages cache so GET /sessions returns real data
+        # On-chain sessions get a "chain-" prefix to avoid colliding with UUID sessions
         if isinstance(parsed, dict):
             sessions_list = parsed.get("sessions", [])
             for s in sessions_list:
                 sid = s.get("sessionId", s.get("session_id"))
                 if sid is not None:
-                    sid = int(sid)
+                    sid = f"chain-{sid}"
                     if sid not in session_messages:
                         session_messages[sid] = []
                         logging.info(f"Registered on-chain session {sid} in local cache")
@@ -1245,7 +1246,7 @@ async def sync_sessions():
             # Try to extract session IDs from string representation
             import re as _re
             for m in _re.finditer(r'sessionId:\s*(\d+)', str(parsed)):
-                sid = int(m.group(1))
+                sid = f"chain-{m.group(1)}"
                 if sid not in session_messages:
                     session_messages[sid] = []
                     logging.info(f"Registered on-chain session {sid} in local cache")
@@ -1894,14 +1895,24 @@ async def get_pending_transactions(request: Request):
 
 
 @app.post("/chat/create-session")
-async def create_session(req: CreateSessionRequest):
+async def create_session(req: CreateSessionRequest, request: Request):
     """Create a new chat session (off-chain for now).
 
     On-chain sessions require multi-party signing (user passkey + sponsor payer)
     which is not yet implemented. Sessions are managed off-chain in the relay cache.
     """
-    session_id = len(session_messages)
+    import uuid as _uuid_mod
+    session_id = str(_uuid_mod.uuid4())
     session_messages[session_id] = []
+
+    # Claim ownership immediately if authenticated
+    try:
+        address = _get_authed_address(request)
+        if address:
+            _session_owners[session_id] = address
+    except Exception:
+        pass  # Unauthenticated — ownership set on first message
+
     logging.info(f"Session created (off-chain): ID={session_id}")
     return {"sessionId": session_id, "success": True, "txResult": "off-chain"}
 
@@ -2174,9 +2185,14 @@ async def send_message(req: SendMessageRequest, request: Request):
     if req.sessionId not in session_messages:
         session_messages[req.sessionId] = []
         logging.info(f"Auto-created off-chain session {req.sessionId} for user {address}")
-    # Track session owner for per-user filtering
-    if address and req.sessionId not in _session_owners:
-        _session_owners[req.sessionId] = address
+
+    # Enforce session ownership — prevent cross-user message injection
+    if address:
+        session_owner = _session_owners.get(req.sessionId)
+        if session_owner and session_owner != address:
+            raise HTTPException(status_code=403, detail="Session belongs to another user")
+        if not session_owner:
+            _session_owners[req.sessionId] = address
 
     logging.info(f"Session ID for this message: {req.sessionId}")
 
@@ -2457,7 +2473,7 @@ async def get_sessions(request: Request):
 
 
 @app.get("/session/{session_id}/messages")
-async def get_session_messages(session_id: int, request: Request):
+async def get_session_messages(session_id: str, request: Request):
     """Fetch messages for a session (must own the session)."""
     if session_id not in session_messages:
         raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
