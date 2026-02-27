@@ -280,11 +280,17 @@ class AccountManager:
             padded = token + "=" * (4 - len(token) % 4)
             token_raw = base64.urlsafe_b64decode(padded).decode("utf-8")
             parts = token_raw.split(":")
-            if len(parts) != 4:
+            if len(parts) < 4:
                 # Try legacy in-memory token
                 return self._verify_legacy_token(token)
 
-            address, credential_id, expires_at_str, sig = parts
+            # Token format: address:credentialId:expiresAt:hmac
+            # credentialId may contain colons, so we extract address (first),
+            # hmac (last), expiresAt (second-to-last), and credentialId (middle).
+            address = parts[0]
+            sig = parts[-1]
+            expires_at_str = parts[-2]
+            credential_id = ":".join(parts[1:-2])
             expires_at = int(expires_at_str)
 
             # Check expiry

@@ -2501,7 +2501,9 @@ async def create_wallet_session(req: WalletSessionRequest):
         address = "0x" + address
 
     # Issue a session token with a wallet-specific credential ID
-    credential_id = f"wallet:{address}"
+    # NOTE: credential_id must NOT contain colons — the HMAC token format
+    # uses colons as delimiters (address:credentialId:expiresAt:hmac)
+    credential_id = f"wallet-{address}"
     token = account_manager._issue_token(address, credential_id, ttl_hours=24)
 
     logging.info(f"Wallet session created for {address}")
