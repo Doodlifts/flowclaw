@@ -44,7 +44,8 @@ export const api = {
 
     // Store message on-chain via multi-party signing (best-effort, non-blocking)
     const address = localStorage.getItem('flowclaw_address');
-    if (address && hasSigningKey(address)) {
+    const onChainToken = localStorage.getItem('flowclaw_session_token');
+    if (address && onChainToken && hasSigningKey(address)) {
       // Fire and forget — don't block the chat UX
       this._storeMessageOnChain(sessionId, content).catch(err => {
         console.error('On-chain message storage failed:', err.message);
@@ -64,14 +65,53 @@ export const api = {
     return handleResponse(res);
   },
 
+  // Internal: ensure an on-chain session exists for the given off-chain session.
+  // Creates it lazily on first message rather than during mount (avoids auth race).
+  async _ensureOnChainSession(sessionId) {
+    if (onChainSessionMap[sessionId] !== undefined) return onChainSessionMap[sessionId];
+
+    try {
+      const txResult = await this.signAndSubmitTransaction(
+        'cadence/transactions/create_session.cdc',
+        [{ type: 'UInt64', value: '4096' }]
+      );
+
+      // Extract on-chain session ID from SessionCreated event
+      if (txResult.events && Array.isArray(txResult.events)) {
+        const sessionEvent = txResult.events.find(e =>
+          e.type && e.type.includes('SessionCreated')
+        );
+        if (sessionEvent) {
+          let onChainId = null;
+          const fields = sessionEvent.payload?.value?.fields;
+          if (Array.isArray(fields)) {
+            const sidField = fields.find(f => f.name === 'sessionId');
+            if (sidField) onChainId = parseInt(sidField.value?.value, 10);
+          }
+          if (onChainId == null && sessionEvent.payload?.sessionId != null) {
+            onChainId = parseInt(sessionEvent.payload.sessionId, 10);
+          }
+          if (onChainId != null && !isNaN(onChainId)) {
+            onChainSessionMap[sessionId] = onChainId;
+            console.log(`Session mapped: off-chain ${sessionId} → on-chain ${onChainId}`);
+            return onChainId;
+          }
+        }
+      }
+    } catch (err) {
+      console.error('On-chain session creation failed:', err.message);
+    }
+    return null;
+  },
+
   // Internal: store a message on-chain (non-blocking)
   // Content is ALWAYS encrypted via the relay before being sent to the chain.
   // Block explorers only see ciphertext — never plaintext.
   async _storeMessageOnChain(sessionId, content) {
-    // Resolve the on-chain session ID (off-chain and on-chain IDs differ)
-    const onChainId = onChainSessionMap[sessionId];
-    if (onChainId === undefined) {
-      console.warn('No on-chain session ID mapped for off-chain session', sessionId, '— skipping on-chain storage');
+    // Ensure on-chain session exists (lazy creation on first message)
+    const onChainId = await this._ensureOnChainSession(sessionId);
+    if (onChainId == null) {
+      console.warn('Could not create on-chain session for off-chain session', sessionId, '— skipping on-chain storage');
       return;
     }
 
@@ -102,52 +142,10 @@ export const api = {
     });
     const sessionData = await handleResponse(res);
 
-    // Also create on-chain session via multi-party signing (if signing key exists)
-    const address = localStorage.getItem('flowclaw_address');
-    if (address && hasSigningKey(address)) {
-      try {
-        const txResult = await this.signAndSubmitTransaction(
-          'cadence/transactions/create_session.cdc',
-          [{ type: 'UInt64', value: String(maxContextMessages) }]
-        );
-        sessionData.txResult = txResult;
-        sessionData.onChain = true;
-
-        // Extract on-chain session ID from SessionCreated event.
-        // Flow event format: { type: "A.<addr>.AgentSession.SessionCreated",
-        //   payload: { value: { fields: [{ name: "sessionId", value: { value: "1" } }, ...] } } }
-        if (txResult.events && Array.isArray(txResult.events)) {
-          const sessionEvent = txResult.events.find(e =>
-            e.type && e.type.includes('SessionCreated')
-          );
-          if (sessionEvent) {
-            let onChainId = null;
-            // Try payload.value.fields (JSON-CDC decoded format)
-            const fields = sessionEvent.payload?.value?.fields;
-            if (Array.isArray(fields)) {
-              const sidField = fields.find(f => f.name === 'sessionId');
-              if (sidField) onChainId = parseInt(sidField.value?.value, 10);
-            }
-            // Fallback: direct value (if relay pre-decoded)
-            if (onChainId == null && sessionEvent.payload?.sessionId != null) {
-              onChainId = parseInt(sessionEvent.payload.sessionId, 10);
-            }
-            if (onChainId != null && !isNaN(onChainId)) {
-              onChainSessionMap[sessionData.sessionId] = onChainId;
-              sessionData.onChainSessionId = onChainId;
-              console.log(`Session mapped: off-chain ${sessionData.sessionId} → on-chain ${onChainId}`);
-            }
-          }
-        }
-      } catch (err) {
-        // Surface the error — don't silently pretend we're on-chain
-        console.error('On-chain session creation failed:', err.message);
-        sessionData.onChainError = err.message;
-        sessionData.onChain = false;
-      }
-    } else {
-      sessionData.onChain = false;
-    }
+    // On-chain session creation is now LAZY — it happens on the first message
+    // in _storeMessageOnChain via _ensureOnChainSession. This avoids the auth
+    // race condition where createSession fires before the token is established.
+    sessionData.onChain = false;
 
     return sessionData;
   },
@@ -411,10 +409,17 @@ export const api = {
       throw new Error('No signing key found. Please create a new account.');
     }
 
+    // Capture auth headers ONCE to avoid race conditions where the token
+    // could be modified between build and submit calls.
+    const headers = getAuthHeaders();
+    if (!headers['Authorization']) {
+      throw new Error('No session token available. Please sign in again.');
+    }
+
     // Step 1: Ask relay to build the unsigned transaction
     const buildRes = await fetch(`${API_BASE}/transaction/build`, {
       method: 'POST',
-      headers: getAuthHeaders(),
+      headers,
       body: JSON.stringify({ transactionPath: txPath, arguments: args }),
     });
     const buildData = await handleResponse(buildRes);
@@ -425,7 +430,7 @@ export const api = {
     // Step 3: Submit the signed transaction back to relay
     const submitRes = await fetch(`${API_BASE}/transaction/submit`, {
       method: 'POST',
-      headers: getAuthHeaders(),
+      headers,
       body: JSON.stringify({
         txBuildId: buildData.txBuildId,
         userSignature: userSignature,
