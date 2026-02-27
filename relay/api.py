@@ -1774,48 +1774,11 @@ async def send_message(req: SendMessageRequest, request: Request):
         "content": req.content,
     })
 
-    # Encrypt and send message on-chain (best-effort for PoC)
+    # On-chain message storage is handled via multi-party signing from the frontend.
+    # The relay no longer sends on-chain transactions from the sponsor account
+    # (the sponsor has no agents/sessions — those belong to user accounts).
     on_chain = False
     on_chain_request_id = 0
-    try:
-        if encryption and encryption.is_configured:
-            # Encrypt the user message before posting on-chain
-            enc = encryption.encrypt(req.content)
-            tx_args = json.dumps([
-                {"type": "UInt64", "value": str(req.sessionId)},
-                {"type": "String", "value": enc["ciphertext"]},
-                {"type": "String", "value": enc["nonce"]},
-                {"type": "String", "value": enc["plaintextHash"]},
-                {"type": "String", "value": enc["keyFingerprint"]},
-                {"type": "UInt8", "value": str(enc["algorithm"])},
-                {"type": "UInt64", "value": str(enc["plaintextLength"])},
-            ])
-            logging.info(f"Sending encrypted message on-chain (hash: {enc['plaintextHash'][:16]}...)")
-        else:
-            # Fallback: send plaintext hash only, empty ciphertext fields
-            content_hash = hashlib.sha256(req.content.encode()).hexdigest()
-            tx_args = json.dumps([
-                {"type": "UInt64", "value": str(req.sessionId)},
-                {"type": "String", "value": req.content},
-                {"type": "String", "value": ""},
-                {"type": "String", "value": content_hash},
-                {"type": "String", "value": ""},
-                {"type": "UInt8", "value": "0"},
-                {"type": "UInt64", "value": str(len(req.content.split()))},
-            ])
-            logging.warning("Encryption not configured — sending plaintext on-chain")
-        tx_result = run_flow_tx("cadence/transactions/send_message.cdc", tx_args)
-        on_chain = tx_result is not None and ("sealed" in tx_result.lower() or "success" in tx_result.lower())
-        # Extract requestId from InferenceRequested event or log
-        if tx_result:
-            rid_match = re.search(r'requestId\s*\(UInt64\):\s*(\d+)', tx_result)
-            if not rid_match:
-                rid_match = re.search(r'Inference requested with ID:\s*(\d+)', tx_result)
-            if rid_match:
-                on_chain_request_id = int(rid_match.group(1))
-                logging.info(f"On-chain request ID: {on_chain_request_id}")
-    except Exception as e:
-        logging.warning(f"On-chain message failed (continuing with LLM): {e}")
 
     # Call LLM with full conversation history + tool definitions
     total_tokens = 0
@@ -1825,10 +1788,22 @@ async def send_message(req: SendMessageRequest, request: Request):
     raw_tool_defs = agent_tool_executor.get_tool_definitions() if agent_tool_executor else []
     tool_defs = [td.get("function", td) for td in raw_tool_defs]
 
+    # Resolve model: use user's request, then agent's model, then a sensible default
+    resolved_model = req.model
+    if not resolved_model and active_agent_id and active_agent_id in agents_cache:
+        resolved_model = agents_cache[active_agent_id].get("model", "")
+    if not resolved_model:
+        # Try to infer from provider type
+        if isinstance(provider, AnthropicProvider):
+            resolved_model = "claude-sonnet-4-5-20250929"
+        else:
+            resolved_model = "gpt-4o-mini"  # safe default for OpenAI-compatible APIs
+    logging.info(f"Using model: {resolved_model}")
+
     for turn in range(max_turns):
         try:
             result = provider.complete(
-                model=req.model,
+                model=resolved_model,
                 messages=messages,
                 max_tokens=4096,
                 temperature=0.7,
@@ -1885,39 +1860,9 @@ async def send_message(req: SendMessageRequest, request: Request):
             "content": response_content,
         })
 
-        # Encrypt and post response on-chain (best-effort)
-        try:
-            if encryption and encryption.is_configured:
-                enc_resp = encryption.encrypt(response_content)
-                tx_args = json.dumps([
-                    {"type": "UInt64", "value": str(req.sessionId)},
-                    {"type": "UInt64", "value": str(on_chain_request_id)},
-                    {"type": "String", "value": enc_resp["ciphertext"]},
-                    {"type": "String", "value": enc_resp["nonce"]},
-                    {"type": "String", "value": enc_resp["plaintextHash"]},
-                    {"type": "String", "value": enc_resp["keyFingerprint"]},
-                    {"type": "UInt8", "value": str(enc_resp["algorithm"])},
-                    {"type": "UInt64", "value": str(enc_resp["plaintextLength"])},
-                    {"type": "UInt64", "value": str(total_tokens)},
-                ])
-                logging.info(f"Posting encrypted response on-chain (hash: {enc_resp['plaintextHash'][:16]}...)")
-            else:
-                resp_hash = hashlib.sha256(response_content.encode()).hexdigest()
-                tx_args = json.dumps([
-                    {"type": "UInt64", "value": str(req.sessionId)},
-                    {"type": "UInt64", "value": str(on_chain_request_id)},
-                    {"type": "String", "value": response_content[:500]},
-                    {"type": "String", "value": ""},
-                    {"type": "String", "value": resp_hash},
-                    {"type": "String", "value": ""},
-                    {"type": "UInt8", "value": "0"},
-                    {"type": "UInt64", "value": str(len(response_content.split()))},
-                    {"type": "UInt64", "value": str(total_tokens)},
-                ])
-                logging.warning("Encryption not configured — posting plaintext response on-chain")
-            run_flow_tx("cadence/transactions/complete_inference_owner.cdc", tx_args)
-        except Exception as e:
-            logging.warning(f"On-chain response post failed: {e}")
+        # On-chain response posting disabled — requires multi-party signing
+        # (the sponsor account has no agents/sessions; those belong to user accounts).
+        # On-chain message storage will be handled via frontend multi-party signing.
 
         return SendMessageResponse(
             requestId=int(time.time() * 1000) % 1000000,
@@ -2322,25 +2267,11 @@ async def create_agent(req: CreateAgentRequest):
     global active_agent_id
 
     try:
-        # Build Cadence transaction arguments
-        tx_args = json.dumps([
-            {"type": "String", "value": req.name},
-            {"type": "String", "value": req.description},
-            {"type": "String", "value": req.provider},
-            {"type": "String", "value": req.model},
-            {"type": "String", "value": ""},  # apiKeyHash
-            {"type": "UInt64", "value": "4096"},  # maxTokens
-            {"type": "UFix64", "value": "0.70000000"},  # temperature
-            {"type": "String", "value": req.systemPrompt or f"You are {req.name}, an AI agent on Flow blockchain."},
-            {"type": "UInt8", "value": str(req.autonomyLevel)},
-            {"type": "UInt64", "value": str(req.maxActionsPerHour)},
-            {"type": "UFix64", "value": f"{req.maxCostPerDay:.8f}"},
-        ])
+        # On-chain agent creation is handled via multi-party signing from the frontend.
+        # The relay only manages the local cache; on-chain tx runs with user as authorizer.
+        success = True
 
-        result = run_flow_tx("cadence/transactions/create_agent_in_collection.cdc", tx_args)
-        success = result is not None and ("sealed" in result.lower() or "success" in result.lower())
-
-        # Cache locally regardless of on-chain result (for PoC)
+        # Cache locally
         agent_id = max(agents_cache.keys()) + 1 if agents_cache else 2
         agents_cache[agent_id] = {
             "name": req.name,
