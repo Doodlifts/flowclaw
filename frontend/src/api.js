@@ -40,7 +40,15 @@ export const api = {
   },
 
   async createSession(maxContextMessages = 4096) {
-    // Use multi-party signing if user has a signing key (on-chain session)
+    // Always create the off-chain session for immediate use
+    const res = await fetch(`${API_BASE}/chat/create-session`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ maxContextMessages }),
+    });
+    const sessionData = await handleResponse(res);
+
+    // Also create on-chain session via multi-party signing (if signing key exists)
     const address = localStorage.getItem('flowclaw_address');
     if (address && hasSigningKey(address)) {
       try {
@@ -48,27 +56,19 @@ export const api = {
           'cadence/transactions/create_session.cdc',
           [{ type: 'UInt64', value: String(maxContextMessages) }]
         );
-        // Also create the off-chain session for immediate use
-        const res = await fetch(`${API_BASE}/chat/create-session`, {
-          method: 'POST',
-          headers: getAuthHeaders(),
-          body: JSON.stringify({ maxContextMessages }),
-        });
-        const sessionData = await handleResponse(res);
         sessionData.txResult = txResult;
-        return sessionData;
+        sessionData.onChain = true;
       } catch (err) {
-        console.warn('On-chain session creation failed, falling back to off-chain:', err.message);
+        // Surface the error — don't silently pretend we're on-chain
+        console.error('On-chain session creation failed:', err.message);
+        sessionData.onChainError = err.message;
+        sessionData.onChain = false;
       }
+    } else {
+      sessionData.onChain = false;
     }
 
-    // Fallback: off-chain only
-    const res = await fetch(`${API_BASE}/chat/create-session`, {
-      method: 'POST',
-      headers: getAuthHeaders(),
-      body: JSON.stringify({ maxContextMessages }),
-    });
-    return handleResponse(res);
+    return sessionData;
   },
 
   // Sessions
@@ -168,11 +168,19 @@ export const api = {
   },
 
   async createAgent(agent) {
-    // Use multi-party signing for on-chain agent creation if signing key exists
+    // Create in relay cache (handles local state + LLM routing)
+    const res = await fetch(`${API_BASE}/agents/create`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify(agent),
+    });
+    const result = await handleResponse(res);
+
+    // Also create on-chain via multi-party signing
     const address = localStorage.getItem('flowclaw_address');
     if (address && hasSigningKey(address)) {
       try {
-        await this.signAndSubmitTransaction(
+        const txResult = await this.signAndSubmitTransaction(
           'cadence/transactions/create_agent_in_collection.cdc',
           [
             { type: 'String', value: agent.name || '' },
@@ -188,18 +196,18 @@ export const api = {
             { type: 'UFix64', value: (agent.maxCostPerDay || 5.0).toFixed(8) },
           ]
         );
+        result.txResult = txResult;
+        result.onChain = true;
       } catch (err) {
-        console.warn('On-chain agent creation failed, proceeding with off-chain:', err.message);
+        console.error('On-chain agent creation failed:', err.message);
+        result.onChainError = err.message;
+        result.onChain = false;
       }
+    } else {
+      result.onChain = false;
     }
 
-    // Always create in relay cache too (handles local state)
-    const res = await fetch(`${API_BASE}/agents/create`, {
-      method: 'POST',
-      headers: getAuthHeaders(),
-      body: JSON.stringify(agent),
-    });
-    return handleResponse(res);
+    return result;
   },
 
   async spawnSubAgent(parentAgentId, subAgent) {
@@ -295,6 +303,13 @@ export const api = {
 
   async getProviderPresets() {
     const res = await fetch(`${API_BASE}/account/provider-presets`);
+    return handleResponse(res);
+  },
+
+  async getProviderModels(providerName) {
+    const res = await fetch(`${API_BASE}/account/providers/${encodeURIComponent(providerName)}/models`, {
+      headers: getAuthHeaders(),
+    });
     return handleResponse(res);
   },
 

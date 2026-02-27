@@ -1788,16 +1788,26 @@ async def send_message(req: SendMessageRequest, request: Request):
     raw_tool_defs = agent_tool_executor.get_tool_definitions() if agent_tool_executor else []
     tool_defs = [td.get("function", td) for td in raw_tool_defs]
 
-    # Resolve model: use user's request, then agent's model, then a sensible default
+    # Resolve model: request → user's default → agent config → provider default
     resolved_model = req.model
+    if not resolved_model:
+        # Check user's default provider config for a stored default_model
+        try:
+            addr = _get_authed_address(request)
+            user_configs = user_providers.get(addr, [])
+            default_config = next((c for c in user_configs if c.get("is_default")), None)
+            if default_config and default_config.get("default_model"):
+                resolved_model = default_config["default_model"]
+        except Exception:
+            pass
     if not resolved_model and active_agent_id and active_agent_id in agents_cache:
         resolved_model = agents_cache[active_agent_id].get("model", "")
     if not resolved_model:
-        # Try to infer from provider type
+        # Infer sensible default from provider type
         if isinstance(provider, AnthropicProvider):
             resolved_model = "claude-sonnet-4-5-20250929"
         else:
-            resolved_model = "gpt-4o-mini"  # safe default for OpenAI-compatible APIs
+            resolved_model = "gpt-4o-mini"
     logging.info(f"Using model: {resolved_model}")
 
     for turn in range(max_turns):
@@ -2220,6 +2230,80 @@ async def set_default_provider(req: SetDefaultProviderRequest, request: Request)
     if not found:
         raise HTTPException(status_code=404, detail=f"Provider '{req.provider_name}' not found")
     return {"success": True}
+
+
+@app.get("/account/providers/{provider_name}/models")
+async def get_provider_models(provider_name: str, request: Request):
+    """Fetch available models from a user's configured LLM provider.
+
+    Queries the provider's API to list available models.
+    Works with OpenAI-compatible APIs (Venice, OpenAI, OpenRouter, Together, Groq)
+    and Anthropic.
+    """
+    address = _get_authed_address(request)
+    configs = user_providers.get(address, [])
+    target = next((c for c in configs if c["name"] == provider_name), None)
+    if not target:
+        raise HTTPException(status_code=404, detail=f"Provider '{provider_name}' not found")
+
+    ptype = target.get("type", "openai-compatible")
+    api_key = target.get("api_key", "")
+    base_url = target.get("base_url", "")
+
+    try:
+        import requests as req_lib
+
+        if ptype == "anthropic":
+            # Anthropic doesn't have a /models endpoint; return known models
+            return {"models": [
+                {"id": "claude-opus-4-5-20251101", "name": "Claude Opus 4.5"},
+                {"id": "claude-sonnet-4-5-20250929", "name": "Claude Sonnet 4.5"},
+                {"id": "claude-haiku-4-5-20251001", "name": "Claude Haiku 4.5"},
+                {"id": "claude-sonnet-4-6-20250514", "name": "Claude Sonnet 4.6"},
+            ]}
+
+        elif ptype == "ollama":
+            # Ollama: GET /api/tags
+            ollama_url = base_url or "http://localhost:11434"
+            resp = req_lib.get(f"{ollama_url}/api/tags", timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                models = [
+                    {"id": m.get("name", ""), "name": m.get("name", ""), "size": m.get("size", 0)}
+                    for m in data.get("models", [])
+                ]
+                return {"models": models}
+            return {"models": [], "error": f"Ollama returned {resp.status_code}"}
+
+        else:
+            # OpenAI-compatible: GET /v1/models
+            url = base_url or "https://api.openai.com/v1"
+            # Strip trailing /v1 if present, then add it back
+            url = url.rstrip("/")
+            if not url.endswith("/v1"):
+                url += "/v1"
+            headers = {"Authorization": f"Bearer {api_key}"}
+            resp = req_lib.get(f"{url}/models", headers=headers, timeout=15)
+            if resp.status_code == 200:
+                data = resp.json()
+                raw_models = data.get("data", data.get("models", []))
+                models = []
+                for m in raw_models:
+                    model_id = m.get("id", "") if isinstance(m, dict) else str(m)
+                    model_name = m.get("id", "") if isinstance(m, dict) else str(m)
+                    owned_by = m.get("owned_by", "") if isinstance(m, dict) else ""
+                    models.append({"id": model_id, "name": model_name, "owned_by": owned_by})
+                # Sort alphabetically
+                models.sort(key=lambda x: x["id"])
+                return {"models": models}
+            else:
+                error_text = resp.text[:300]
+                logging.warning(f"Model list fetch failed from {url}: {resp.status_code} {error_text}")
+                return {"models": [], "error": f"Provider returned {resp.status_code}"}
+
+    except Exception as e:
+        logging.error(f"Error fetching models for {provider_name}: {e}")
+        return {"models": [], "error": str(e)}
 
 
 @app.get("/account/provider-presets")

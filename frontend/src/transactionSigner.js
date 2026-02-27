@@ -116,8 +116,16 @@ export async function signFlowPayload(payloadHex, userAddress) {
     payloadBytes
   );
 
-  // 5. SubtleCrypto returns DER-encoded signature — convert to raw r||s (64 bytes)
-  const rawSignature = derToRaw(new Uint8Array(signatureBuffer));
+  // 5. SubtleCrypto ECDSA returns raw r||s format (64 bytes for P-256), NOT DER.
+  //    This is exactly what Flow expects, so no conversion needed.
+  const rawSignature = new Uint8Array(signatureBuffer);
+
+  if (rawSignature.length !== 64) {
+    throw new Error(
+      `Unexpected signature length: ${rawSignature.length} bytes (expected 64). ` +
+      `This may indicate a browser compatibility issue.`
+    );
+  }
 
   // 6. Return base64-encoded
   return bytesToBase64(rawSignature);
