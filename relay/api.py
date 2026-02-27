@@ -112,7 +112,8 @@ start_time: float = 0
 # Multi-agent state
 agents_cache: Dict[int, Dict] = {}  # Empty — user creates agents after adding LLM provider
 active_agent_id: Optional[int] = None  # No agent selected until user creates one
-active_user_address: Optional[str] = None  # Tracks last authenticated user for sub-agent BYOK
+# Per-agent user address mapping: agent_id -> user address (multi-user safe)
+_agent_user_map: Dict[int, str] = {}
 session_messages: Dict[int, List[Dict]] = {}  # Local cache for PoC
 memory_cache: Dict[int, Dict] = {}  # Local cache for memory operations
 tasks_cache: Dict[int, Dict] = {}  # Local cache for task operations
@@ -384,7 +385,7 @@ async def background_task_executor():
 
                     # Get LLM provider: try user's BYOK first, then global fallback
                     provider = None
-                    task_user_addr = task.get("userAddress") or active_user_address
+                    task_user_addr = task.get("userAddress")
                     if task_user_addr:
                         provider = _get_user_provider(task_user_addr)
                     if not provider and providers:
@@ -863,9 +864,9 @@ async def startup():
         parent_id = active_agent_id or 1
         expires_at = time.time() + ttl_seconds if ttl_seconds else None
         sub_id = max(agents_cache.keys()) + 1 if agents_cache else 3
-        # Inherit provider/model from parent agent + use active user address for BYOK
+        # Inherit provider/model/userAddress from parent agent (multi-user safe)
         parent_entry = agents_cache.get(parent_id, {})
-        user_addr = active_user_address or parent_entry.get("userAddress")
+        user_addr = parent_entry.get("userAddress") or _agent_user_map.get(parent_id)
         agents_cache[sub_id] = {
             "name": name,
             "description": description,
@@ -883,7 +884,7 @@ async def startup():
             "model": parent_entry.get("model"),
             "userAddress": user_addr,
         }
-        logging.info(f"Sub-agent {sub_id} userAddress={user_addr} (active_user_address={active_user_address})")
+        logging.info(f"Sub-agent {sub_id} userAddress={user_addr} (from parent {parent_id})")
         logging.info(f"LLM spawned sub-agent: ID={sub_id}, parent={parent_id}, name={name}")
 
         # Kick off the sub-agent's task in the background
@@ -1774,12 +1775,14 @@ async def send_message(req: SendMessageRequest, request: Request):
     4. Return plaintext response to frontend
     """
     # Try to get user-specific provider first (BYOK)
-    global active_user_address
     provider = None
     address = None
     try:
         address = _get_authed_address(request)
-        active_user_address = address  # Track for sub-agent BYOK resolution
+        # Store user address on the active agent for multi-user BYOK support
+        if active_agent_id and active_agent_id in agents_cache:
+            agents_cache[active_agent_id]["userAddress"] = address
+        _agent_user_map[active_agent_id or 0] = address
         provider = _get_user_provider(address, req.provider)
     except HTTPException:
         pass  # No auth token — fall back to global providers
@@ -2490,7 +2493,7 @@ async def get_agents():
 
 
 @app.post("/agents/create")
-async def create_agent(req: CreateAgentRequest):
+async def create_agent(req: CreateAgentRequest, request: Request):
     """Create a new agent in the account's AgentCollection."""
     global active_agent_id
 
@@ -2501,6 +2504,13 @@ async def create_agent(req: CreateAgentRequest):
 
         # Cache locally
         agent_id = max(agents_cache.keys()) + 1 if agents_cache else 2
+        # Capture user address for BYOK provider resolution
+        creator_address = None
+        try:
+            creator_address = _get_authed_address(request)
+        except Exception:
+            pass
+
         agents_cache[agent_id] = {
             "name": req.name,
             "description": req.description,
@@ -2512,7 +2522,10 @@ async def create_agent(req: CreateAgentRequest):
             "systemPrompt": req.systemPrompt or f"You are {req.name}, an AI agent on Flow blockchain.",
             "provider": req.provider,
             "model": req.model,
+            "userAddress": creator_address,
         }
+        if creator_address:
+            _agent_user_map[agent_id] = creator_address
 
         # Set as active if first additional agent
         if active_agent_id is None:
@@ -2767,7 +2780,7 @@ async def schedule_task(req: ScheduleTaskRequest, request: Request):
             try:
                 task_user_addr = _get_authed_address(request)
             except Exception:
-                task_user_addr = active_user_address
+                pass
 
             # Cache the operation
             task_id = _next_task_id
