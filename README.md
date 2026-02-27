@@ -1,8 +1,34 @@
 # FlowClaw
 
-**An agentic AI harness on the Flow blockchain — private inference, verifiable history, permissionless extensions, and composable on-chain primitives.**
+**The first agentic AI harness that couldn't exist on any other blockchain.**
 
-FlowClaw reimagines [OpenClaw](https://github.com/openclaw/openclaw) as a blockchain-native system. Every agent is a Cadence Resource owned by a Flow account. Your conversations are end-to-end encrypted. Your config, memory, and session history live in your account's private storage. Nobody — not even FlowClaw's creators — can read your messages or control your agent.
+FlowClaw puts your AI agent on-chain — not as a gimmick, but because Flow's account model solves problems that every other agent platform works around. Your agent is a Cadence Resource that lives in your account. Your conversations are end-to-end encrypted before they touch the chain. Your memory, sessions, scheduled tasks, and extensions are all owned by you — not by a platform, not by a DAO, not by whoever runs the server. And you never had to install a wallet or buy tokens to get here.
+
+This isn't "AI + blockchain" for the sake of it. FlowClaw exists because Flow is the only chain where the entire agent ownership stack — account creation, key management, gas sponsorship, multi-party signing, scheduled execution, and resource-oriented storage — works natively without hacks or workarounds.
+
+## Why Flow Makes This Possible
+
+Most blockchains treat accounts as a thin wrapper around a keypair. Flow treats accounts as first-class programmable containers with their own storage, keys, and capabilities. That distinction is what makes FlowClaw work.
+
+**Resource-oriented ownership.** In Cadence, a Resource can only exist in one place at a time. When your agent is a Resource stored in your account, no smart contract bug can duplicate it, no admin key can move it, and no platform can revoke it. This is a language-level guarantee — not a convention, not a governance promise. Ethereum's ERC-721 tokens approximate this with a mapping, but the "ownership" is just an entry in someone else's contract storage. On Flow, the agent literally lives in your account's storage. If the FlowClaw contracts disappeared tomorrow, your Resources would still be there.
+
+**Native multi-party signing.** Flow transactions have three distinct roles — proposer, authorizer, and payer — built into the protocol. FlowClaw uses this so you authorize actions on your account while a gas sponsor pays the fees. On Ethereum, this requires ERC-4337 account abstraction with bundlers, paymasters, and entry point contracts. On Solana, you'd need a program to proxy-sign. On Flow, it's a first-class transaction feature that works with any contract. Every FlowClaw transaction uses this: you sign the payload (proposer + authorizer), the sponsor signs the envelope (payer). No proxy contracts. No relayers pretending to be you.
+
+**Gasless onboarding with passkeys.** Flow accounts support P-256 keys natively — the same curve used by WebAuthn passkeys and Apple/Google's biometric authentication. FlowClaw creates your Flow account using your passkey's public key, then generates a SubtleCrypto P-256 signing key in your browser for transactions. No MetaMask. No seed phrases. No browser extension. You authenticate with Face ID or Touch ID and you have a fully functional blockchain account with its own storage, keys, and on-chain Resources. Try doing that on a secp256k1 chain.
+
+**Validator-executed scheduled transactions.** Most blockchains require off-chain keepers (Chainlink Automation, Gelato) or centralized cron services to execute recurring tasks. Flow's AgentScheduler stores your task parameters on-chain and validators can trigger execution at the specified intervals. The schedule is a Resource in your account — you own it, you control it, you can cancel it. No third-party keeper network. No "sorry, our cron server was down."
+
+**Account-level storage with cheap capacity.** Flow accounts have dedicated storage proportional to their FLOW balance. FlowClaw stores encrypted messages, memories, agent config, tool definitions, lifecycle hooks, and extension metadata directly in account storage. This is far cheaper than Ethereum's global state storage and far more natural than Solana's rent-based account model. A single Flow account can hold an agent's entire history — hundreds of sessions, thousands of encrypted messages — without running into storage rent concerns.
+
+**Cadence's capability-based security.** Extensions in FlowClaw declare what entitlements they need — read memory, register hooks, execute tools — and the language enforces these boundaries. An extension that requests `ManageTools` literally cannot access your memory vault. This isn't a permissions check in a contract — it's a type system constraint that the Cadence runtime enforces. Publish your extension permissionlessly, and users can review exactly what capabilities it requests before installing.
+
+## What This Means in Practice
+
+On Ethereum, building FlowClaw would require: ERC-4337 for account abstraction + a bundler network + a paymaster contract + ERC-721 for agent "ownership" (still just a mapping) + Chainlink Automation for scheduling + a separate encryption layer + ENS or similar for human-readable identity + significant gas costs for storage. You'd need 6+ third-party dependencies before writing a single line of agent logic.
+
+On Solana, you'd need: a custom program for agent accounts + a fee payer proxy + a keeper network for scheduling + a PDA scheme for storage + rent-exempt balance management + no resource-oriented safety guarantees.
+
+On Flow, all of this is native: multi-party signing for gas sponsorship, P-256 keys for passkey auth, Resources for agent ownership, account storage for cheap on-chain state, and scheduled transactions for recurring tasks. FlowClaw's 11 contracts are the entire stack. No external dependencies. No keeper networks. No bundlers.
 
 ## Get Started
 
@@ -49,15 +75,16 @@ What happens when you sign up:
 
 ## Why FlowClaw?
 
-| Problem with traditional agents | FlowClaw's solution |
-|---|---|
-| Maintainers control what gets merged | Permissionless extension system — publish without approval |
-| Cron jobs are unreliable | Flow's validator-executed scheduled transactions |
-| No proof your agent said what it said | Every message is hashed and stored on-chain |
-| Platform can read your conversations | E2E encryption — chain only sees ciphertext |
-| Agent config lives on someone else's server | Config is a Cadence Resource in YOUR account |
-| Platform locks you into their LLM provider | BYOK — bring your own key for any OpenAI-compatible, Anthropic, or local Ollama provider |
-| Agent actions run on a centralized server | Multi-party signing — your account authorizes, sponsor just pays gas |
+| Problem with traditional agents | FlowClaw's solution | Why it requires Flow |
+|---|---|---|
+| Maintainers control what gets merged | Permissionless extension system — publish without approval | Cadence entitlements enforce capability boundaries at the language level |
+| Cron jobs are unreliable | Validator-executed scheduled transactions | Native to Flow — no Chainlink keepers or off-chain cron |
+| No proof your agent said what it said | Every message is hashed and stored on-chain | Cheap account storage makes full history viable |
+| Platform can read your conversations | E2E encryption — chain only sees ciphertext | Account storage keeps encrypted data in your control |
+| Agent config lives on someone else's server | Config is a Cadence Resource in YOUR account | Resources can only exist in one place — language-level ownership |
+| Platform locks you into their LLM provider | BYOK — bring your own key for any provider | Not chain-specific, but enabled by the self-sovereign architecture |
+| Agent actions run on a centralized server | Multi-party signing — your account authorizes, sponsor just pays gas | Native transaction roles (proposer/authorizer/payer) — no ERC-4337 |
+| Users need a wallet and tokens to start | Passkey onboarding — Face ID, no wallet, no tokens | P-256 native key support + multi-party signing for gas sponsorship |
 
 ## How It Works
 
@@ -93,6 +120,8 @@ The signing flow:
 5. Relay adds the sponsor's envelope signature and submits to Flow's REST API
 6. Flow verifies both signatures and executes the transaction
 
+Per-account sequence number tracking with optimistic nonce management ensures rapid successive transactions (e.g., creating a session then immediately sending a message) don't conflict.
+
 ## Bring Your Own Key (BYOK)
 
 FlowClaw doesn't lock you into a single LLM provider. From Settings, you can configure:
@@ -103,7 +132,7 @@ FlowClaw doesn't lock you into a single LLM provider. From Settings, you can con
 - **Ollama** — fully local inference (your messages never leave your machine)
 - **Any OpenAI-compatible API** — OpenRouter, Together, Groq, etc.
 
-Your API keys are stored per-account and never touch the blockchain.
+Your API keys are stored per-account in the relay and never touch the blockchain. The relay supports concurrent users with isolated provider resolution — each user's BYOK configuration is independent.
 
 ## Agent Capabilities
 
@@ -113,8 +142,9 @@ Your agent can do more than chat. It has on-chain tools:
 - **Send tokens** — transfer FLOW to any address (with configurable safety limits)
 - **Execute transactions** — run custom Cadence transactions on-chain
 - **Web fetch** — pull data from external APIs and websites
-- **Spawn sub-agents** — create child agents for parallel tasks
+- **Spawn sub-agents** — create child agents for parallel tasks, with provider inheritance from the parent
 - **Cognitive memory** — store and recall information with molecular bonding and dream cycles
+- **Scheduled tasks** — validator-executed recurring actions stored as Resources in your account
 - **DeFi integrations** — via permissionless extensions
 
 All agent actions are rate-limited and subject to your security policy.
@@ -209,6 +239,7 @@ The relay communicates directly with the Flow Access REST API — no CLI depende
 - **Transaction submission**: HTTP POST to `/v1/transactions` with base64-encoded envelope
 - **Account queries**: HTTP GET to `/v1/accounts/{addr}?expand=keys`
 - **Content encryption**: `POST /encrypt` for encrypting content before multi-party signed transactions
+- **Sequence management**: Per-account optimistic nonce tracking with automatic retry on conflicts
 
 The `FlowRESTClient` (`relay/flow_client.py`) handles all of this.
 
@@ -284,7 +315,7 @@ flowclaw/
 
 **v0.3.0-alpha** — Mainnet-deployed and functional.
 
-All 11 Cadence contracts deployed on Flow mainnet (`0x91d0a5b7c9832a8b`). Multi-party transaction signing with user as authorizer and gas sponsor as payer. E2E encryption enforced for all on-chain content (XChaCha20-Poly1305). Passkey authentication with SubtleCrypto transaction signing. BYOK support for any OpenAI-compatible, Anthropic, or Ollama provider. Cognitive memory with molecular bonding and dream cycles. React frontend with real-time chat.
+All 11 Cadence contracts deployed on Flow mainnet (`0x91d0a5b7c9832a8b`). Multi-party transaction signing with user as authorizer and gas sponsor as payer. E2E encryption enforced for all on-chain content (XChaCha20-Poly1305). Passkey authentication with SubtleCrypto transaction signing. BYOK support for any OpenAI-compatible, Anthropic, or Ollama provider. Cognitive memory with molecular bonding and dream cycles. Sub-agent spawning with provider inheritance. Per-account sequence number tracking for rapid transaction submission. Multi-user concurrent safety across all relay endpoints. React frontend with real-time chat.
 
 ## Contributing
 
