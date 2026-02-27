@@ -2159,9 +2159,11 @@ async def send_message(req: SendMessageRequest, request: Request):
         if address:
             system_content += (
                 f"OWNER INFO: The user's Flow address is {address}. "
-                "When they ask about 'my balance' or 'my account', use this address with query_balance. "
-                "Financial tools (send_flow_tokens, execute_transaction) operate on the USER's account — "
-                "funds come from their wallet, NOT the sponsor. Transactions are queued for the user's "
+                "This is YOUR wallet — you are this user's personal AI agent and this is YOUR address. "
+                "When asked 'what's my balance', 'how much FLOW do I have', or similar, "
+                "IMMEDIATELY call query_balance with this address — do NOT say you don't have a wallet. "
+                "You DO have a wallet. Financial tools (send_flow_tokens, execute_transaction) operate "
+                "on this account — funds come from YOUR wallet. Transactions are queued for the user's "
                 "browser to sign automatically.\n\n"
             )
 
