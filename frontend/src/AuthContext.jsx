@@ -81,47 +81,13 @@ export function AuthProvider({ children }) {
   const [sessionToken, setSessionToken] = useState(null);
   const [passkeyCreating, setPasskeyCreating] = useState(false);
 
-  // Subscribe to FCL current user (for wallet-connected users)
-  useEffect(() => {
-    const unsub = fcl.currentUser.subscribe(async (currentUser) => {
-      if (currentUser.loggedIn && currentUser.addr && authMethod === "wallet" && !sessionToken) {
-        // Wallet user just authenticated via FCL — get a session token from relay
-        try {
-          const res = await fetch(`${API_BASE}/account/wallet-session`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ address: currentUser.addr }),
-          });
-          if (res.ok) {
-            const data = await res.json();
-            setUser({ loggedIn: true, addr: currentUser.addr });
-            setSessionToken(data.token);
-            setInitialized(true);
-            localStorage.setItem("flowclaw_session_token", data.token);
-            localStorage.setItem("flowclaw_address", currentUser.addr);
-            localStorage.setItem("flowclaw_auth_method", "wallet");
-            console.log("Wallet session established:", currentUser.addr);
-
-            // Setup on-chain resources (triggers wallet popups for approval)
-            repairOnChainResources(currentUser.addr, data.token).catch(
-              (e) => console.warn("Wallet on-chain setup skipped:", e.message)
-            );
-          }
-        } catch (err) {
-          console.error("Wallet session creation failed:", err);
-        }
-      }
-      setLoading(false);
-    });
-    return () => unsub();
-  }, [authMethod, sessionToken]);
+  // FCL wallet subscribe disabled — will return with Hybrid Custody
+  // When re-enabled, this subscribes to fcl.currentUser and creates
+  // a relay session token for wallet-connected users.
 
   // Ensure on-chain resources are complete (idempotent repair for existing accounts)
-  // Works for both passkey and wallet users via api.signAndSubmitTransaction
   const repairOnChainResources = async (address, token) => {
-    const method = localStorage.getItem("flowclaw_auth_method");
-    // Passkey users need a signing key; wallet users sign via FCL
-    if (method !== "wallet" && !hasSigningKey(address)) return;
+    if (!hasSigningKey(address)) return;
 
     try {
       // Re-run setup_full_account (idempotent — only creates missing resources)
@@ -435,13 +401,11 @@ export function AuthProvider({ children }) {
     }
   };
 
-  // ------------------------------------------------------------------
-  // FCL Wallet Connect
-  // ------------------------------------------------------------------
-  const connectWallet = () => {
-    setAuthMethod("wallet");
-    return fcl.authenticate();
-  };
+  // FCL Wallet Connect — disabled, will return with Hybrid Custody
+  // const connectWallet = () => {
+  //   setAuthMethod("wallet");
+  //   return fcl.authenticate();
+  // };
 
   // ------------------------------------------------------------------
   // Disconnect
@@ -546,7 +510,6 @@ export function AuthProvider({ children }) {
     hasSigningKey: user.addr ? hasSigningKey(user.addr) : false,
 
     // Auth methods
-    connectWallet,
     disconnectWallet,
     loginWithEmail,
     createPasskeyAccount,

@@ -7,7 +7,7 @@
 import { useState } from "react";
 import {
   Cpu, Shield, Clock, Puzzle, Zap, Lock, Globe, ArrowUpRight,
-  Wallet, Mail, ChevronRight, Loader2, Activity, Brain, Database,
+  ChevronRight, Loader2, Activity, Brain, Database,
   Fingerprint, CheckCircle, Sparkles, Key
 } from "lucide-react";
 import { useAuth } from "./AuthContext";
@@ -37,7 +37,7 @@ const StepItem = ({ number, title, description }) => (
 
 export default function LandingPage() {
   const {
-    connectWallet, loginWithEmail, createPasskeyAccount,
+    createPasskeyAccount,
     authenticatePasskey, hasStoredPasskey, passkeyCreating, loading
   } = useAuth();
 
@@ -73,24 +73,8 @@ export default function LandingPage() {
     }
   };
 
-  const handleWalletConnect = async () => {
-    setAuthLoading(true);
-    try {
-      await connectWallet();
-    } finally {
-      setAuthLoading(false);
-    }
-  };
-
-  const handleEmailLogin = async () => {
-    if (!email.trim()) return;
-    setAuthLoading(true);
-    try {
-      await loginWithEmail(email);
-    } finally {
-      setAuthLoading(false);
-    }
-  };
+  // Wallet connect disabled — will return with Hybrid Custody
+  // Email login disabled — stub only
 
   // Success state after account creation
   if (creationResult) {
@@ -227,23 +211,6 @@ export default function LandingPage() {
                 )}
               </button>
             </div>
-
-            {/* Divider */}
-            <div className="flex items-center gap-3 py-1">
-              <div className="flex-1 border-t border-zinc-800" />
-              <span className="text-xs text-zinc-600">or</span>
-              <div className="flex-1 border-t border-zinc-800" />
-            </div>
-
-            {/* Flow Wallet */}
-            <button
-              onClick={handleWalletConnect}
-              disabled={authLoading}
-              className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-zinc-900 border border-zinc-800 hover:border-zinc-700 text-zinc-300 rounded-xl text-xs font-medium transition disabled:opacity-50"
-            >
-              <Wallet size={14} />
-              Connect Flow Wallet
-            </button>
 
             {error && (
               <div className="text-xs text-red-400 bg-red-950/30 border border-red-900/30 rounded-lg px-3 py-2">

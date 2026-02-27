@@ -187,11 +187,7 @@ export const api = {
   // Memory
   async storeMemory(key, content, tags = [], source = 'frontend') {
     const headers = getAuthHeaders();
-    const authMethod = localStorage.getItem('flowclaw_auth_method');
 
-    // Wallet users: encrypt via relay, then sign the tx through the wallet
-    // The relay's /memory/store does encryption + classification but returns
-    // a pending build for passkey users. For wallet users, we handle it differently.
     const res = await fetch(`${API_BASE}/memory/store`, {
       method: 'POST',
       headers,
@@ -203,30 +199,7 @@ export const api = {
     if (data.pendingSign && data.txBuildId && data.payloadHex) {
       const address = localStorage.getItem('flowclaw_address');
 
-      if (authMethod === 'wallet') {
-        // Wallet: can't sign the relay-built payload; instead submit via
-        // signAndSubmitTransaction which uses fcl.mutate()
-        // The relay build is stale — we ignore it and do a fresh FCL transaction
-        try {
-          const txResult = await this.signAndSubmitTransaction(
-            'cadence/transactions/store_memory.cdc',
-            [
-              { type: 'String', value: key },
-              { type: 'String', value: data.encCiphertext || '' },
-              { type: 'String', value: data.encNonce || '' },
-              { type: 'String', value: data.encPlaintextHash || '' },
-              { type: 'String', value: data.encKeyFingerprint || '' },
-              { type: 'UInt8', value: String(data.encAlgorithm || 0) },
-              { type: 'UInt64', value: String(data.encPlaintextLength || 0) },
-              { type: 'Array', value: (tags || []).map(t => ({ type: 'String', value: t })) },
-              { type: 'String', value: source },
-            ]
-          );
-          return { ...data, txResult, onChain: true };
-        } catch (signErr) {
-          console.warn('Memory wallet signing failed, stored locally:', signErr);
-        }
-      } else if (address && hasSigningKey(address)) {
+      if (address && hasSigningKey(address)) {
         // Passkey: sign the relay-built payload locally
         try {
           const userSignature = await signFlowPayload(data.payloadHex, address);
@@ -252,11 +225,6 @@ export const api = {
   // Poll and sign pending background transactions (auto-memory, sub-agents)
   async signPendingTransactions() {
     const address = localStorage.getItem('flowclaw_address');
-    const authMethod = localStorage.getItem('flowclaw_auth_method');
-    // Wallet users: skip auto-signing to avoid spamming wallet popups.
-    // Background operations fall back to sponsor-signed on the relay.
-    if (authMethod === 'wallet') return [];
-    // Passkey users need a signing key
     if (!address || !hasSigningKey(address)) return [];
 
     const headers = getAuthHeaders();
@@ -568,14 +536,8 @@ export const api = {
     const address = localStorage.getItem('flowclaw_address');
     if (!address) throw new Error('Not logged in');
 
-    const authMethod = localStorage.getItem('flowclaw_auth_method');
-
-    // Wallet users: sign via FCL (triggers wallet popup)
-    if (authMethod === 'wallet') {
-      return this._signAndSubmitWallet(txPath, args);
-    }
-
-    // Passkey users: sign locally with SubtleCrypto
+    // Wallet signing disabled — will return with Hybrid Custody
+    // For now, all users sign via passkey (SubtleCrypto)
     return this._signAndSubmitPasskey(txPath, args, address);
   },
 
