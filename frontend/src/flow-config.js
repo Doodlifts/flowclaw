@@ -3,7 +3,7 @@
 
 import * as fcl from "@onflow/fcl";
 
-const NETWORK = import.meta.env.VITE_FLOW_NETWORK || "testnet";
+const NETWORK = import.meta.env.VITE_FLOW_NETWORK || "mainnet";
 
 const configs = {
   testnet: {
@@ -41,7 +41,7 @@ const configs = {
   },
 };
 
-fcl.config(configs[NETWORK] || configs.testnet);
+fcl.config(configs[NETWORK] || configs.mainnet);
 
 export { fcl, NETWORK };
 

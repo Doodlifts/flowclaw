@@ -308,7 +308,7 @@ export default function LandingPage() {
           </div>
           <div className="flex items-center gap-2">
             <Globe size={12} className="text-emerald-500" />
-            <span>Flow Testnet</span>
+            <span>Flow Mainnet</span>
           </div>
         </div>
       </section>

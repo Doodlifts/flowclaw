@@ -1526,7 +1526,7 @@ const SettingsTab = () => {
           </div>
           <div className="flex justify-between">
             <span className="text-zinc-500">Network</span>
-            <span className="text-teal-400">{NETWORK || "testnet"}</span>
+            <span className="text-teal-400">{NETWORK || "mainnet"}</span>
           </div>
         </div>
       </div>

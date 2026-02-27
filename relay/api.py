@@ -1287,33 +1287,44 @@ async def sync_extensions_endpoint():
 
 @app.post("/chat/create-session")
 async def create_session(req: CreateSessionRequest):
-    """Create a new session on-chain."""
-    args = json.dumps([{"type": "UInt64", "value": str(req.maxContextMessages)}])
-    result = run_flow_tx("cadence/transactions/create_session.cdc", args)
+    """Create a new session on-chain. Falls back to off-chain session if no agent exists yet."""
+    try:
+        args = json.dumps([{"type": "UInt64", "value": str(req.maxContextMessages)}])
+        result = run_flow_tx("cadence/transactions/create_session.cdc", args)
 
-    if result and ("sealed" in result.lower()):
-        # Query on-chain session count to get the latest session ID
-        # Sessions are 0-indexed, so latest = count - 1
-        acct_result = run_flow_script(
-            "cadence/scripts/get_account_status.cdc",
-            json.dumps([{"type": "Address", "value": config.flow_account_address}])
-        )
-        session_id = 0
-        if acct_result:
-            count_match = re.search(r'sessionCount:\s*(\d+)', acct_result)
-            if count_match:
-                count = int(count_match.group(1))
-                session_id = count - 1
-                logging.info(f"On-chain session count: {count}, using session ID: {session_id}")
+        if result and ("sealed" in result.lower()):
+            # Query on-chain session count to get the latest session ID
+            # Sessions are 0-indexed, so latest = count - 1
+            acct_result = run_flow_script(
+                "cadence/scripts/get_account_status.cdc",
+                json.dumps([{"type": "Address", "value": config.flow_account_address}])
+            )
+            session_id = 0
+            if acct_result:
+                count_match = re.search(r'sessionCount:\s*(\d+)', acct_result)
+                if count_match:
+                    count = int(count_match.group(1))
+                    session_id = count - 1
+                    logging.info(f"On-chain session count: {count}, using session ID: {session_id}")
+                else:
+                    logging.warning(f"Could not parse sessionCount from: {acct_result[:200]}")
             else:
-                logging.warning(f"Could not parse sessionCount from: {acct_result[:200]}")
-        else:
-            logging.warning("Could not query account status for session count")
+                logging.warning("Could not query account status for session count")
 
+            session_messages[session_id] = []
+            return {"sessionId": session_id, "success": True, "txResult": "sealed"}
+        else:
+            # On-chain session creation failed — fall back to off-chain session
+            logging.warning(f"On-chain session creation failed (no agent yet?), using off-chain session: {str(result)[:200]}")
+            session_id = len(session_messages)
+            session_messages[session_id] = []
+            return {"sessionId": session_id, "success": True, "txResult": "off-chain"}
+    except Exception as e:
+        # Graceful fallback — create off-chain session (user may not have created an agent yet)
+        logging.warning(f"Session creation error, falling back to off-chain: {e}")
+        session_id = len(session_messages)
         session_messages[session_id] = []
-        return {"sessionId": session_id, "success": True, "txResult": "sealed"}
-    else:
-        raise HTTPException(status_code=500, detail=f"Failed to create session: {result}")
+        return {"sessionId": session_id, "success": True, "txResult": "off-chain"}
 
 
 def _build_memory_context(user_message: str) -> str:
@@ -2223,18 +2234,8 @@ async def get_provider_presets():
 async def get_agents():
     """List all agents for this account."""
     if not agents_cache:
-        # Return default single agent if no multi-agent setup yet
-        return [{
-            "id": 1,
-            "name": "FlowClaw Agent",
-            "description": "Default agent",
-            "isActive": True,
-            "isDefault": True,
-            "isSubAgent": False,
-            "totalSessions": len(session_messages),
-            "totalInferences": 0,
-            "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        }]
+        # No agents yet — user needs to create one after adding LLM provider
+        return []
 
     return [
         {
