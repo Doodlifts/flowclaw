@@ -238,9 +238,10 @@ class AgentToolExecutor:
                 "function": {
                     "name": "send_flow_tokens",
                     "description": (
-                        "Send FLOW tokens from the agent's wallet to another Flow address. "
-                        "This submits a real on-chain transaction. Use when the user asks "
-                        "to transfer, send, or move FLOW to an address."
+                        "Send FLOW tokens from the user's wallet to another Flow address. "
+                        "This queues a real on-chain transaction for the user's approval. "
+                        "Funds come from the user's account, NOT the sponsor. "
+                        "Use when the user asks to transfer, send, or move FLOW."
                     ),
                     "parameters": {
                         "type": "object",
@@ -263,9 +264,9 @@ class AgentToolExecutor:
                 "function": {
                     "name": "execute_transaction",
                     "description": (
-                        "Execute a custom Cadence transaction on the Flow blockchain. "
-                        "This can modify on-chain state. Use for any on-chain action "
-                        "beyond simple FLOW transfers — like interacting with contracts, "
+                        "Execute a custom Cadence transaction on the user's Flow account. "
+                        "This queues a transaction for the user's approval. The user is the signer, "
+                        "NOT the sponsor. Use for on-chain actions like interacting with contracts, "
                         "creating resources, updating storage, etc."
                     ),
                     "parameters": {
@@ -415,6 +416,7 @@ class AgentToolExecutor:
         tool_name: str,
         parameters: Dict[str, Any],
         security: Optional[SecurityContext] = None,
+        user_address: Optional[str] = None,
     ) -> ToolResult:
         """
         Execute a tool with the given parameters.
@@ -423,6 +425,7 @@ class AgentToolExecutor:
             tool_name: Name of the tool to execute
             parameters: Tool parameters from LLM
             security: Agent's security context (optional for backward compat)
+            user_address: The authenticated user's Flow address (for financial tools)
 
         Returns:
             ToolResult with the execution outcome
@@ -441,6 +444,16 @@ class AgentToolExecutor:
                 )
             security.action_count_this_hour += 1
 
+        # Financial/transaction tools MUST have a user address — never sign as sponsor
+        financial_tools = {"send_flow_tokens", "execute_transaction"}
+        if tool_name in financial_tools and not user_address:
+            return ToolResult(
+                tool_name=tool_name,
+                success=False,
+                output=None,
+                error="Financial tools require an authenticated user. Please sign in first.",
+            )
+
         # Find and execute tool
         tool_fn = self._tools.get(tool_name)
         if not tool_fn:
@@ -452,7 +465,11 @@ class AgentToolExecutor:
             )
 
         try:
-            result = tool_fn(parameters)
+            # Pass user_address to tools that need it
+            if tool_name in financial_tools:
+                result = tool_fn(parameters, user_address=user_address)
+            else:
+                result = tool_fn(parameters)
             execution_ms = int((time.time() - start_time) * 1000)
 
             return ToolResult(
@@ -636,11 +653,18 @@ class AgentToolExecutor:
 
         return self._run_cadence_script(script, arguments)
 
-    def _tool_send_flow_tokens(self, params: Dict) -> Dict:
-        """Send FLOW tokens to another address."""
+    def _tool_send_flow_tokens(self, params: Dict, user_address: str = None) -> Dict:
+        """Send FLOW tokens from the USER's account (not the sponsor).
+
+        Uses multi-party signing: user is proposer+authorizer (signs the payload),
+        sponsor is payer (signs the envelope). The Cadence `signer` is the user,
+        so funds come from the user's vault.
+        """
         to_address = params.get("to_address", "")
         amount = params.get("amount", "")
 
+        if not user_address:
+            raise ValueError("User address is required for financial transactions")
         if not to_address:
             raise ValueError("'to_address' parameter is required")
         if not amount:
@@ -665,7 +689,7 @@ class AgentToolExecutor:
                 raise
             raise ValueError(f"Invalid amount: {amount}")
 
-        # Build the FLOW transfer transaction
+        # Build the FLOW transfer transaction — signer is the USER
         tx_code = """
 import "FungibleToken"
 import "FlowToken"
@@ -699,39 +723,52 @@ transaction(amount: UFix64, to: Address) {
                 {"type": "UFix64", "value": amount},
                 {"type": "Address", "value": to_address},
             ]
-            result = self.flow_client.send_transaction(tx_code, arguments)
 
-            status = result.get("status", "UNKNOWN")
-            tx_id = result.get("txId", "")
-            error = result.get("error", "")
+            # Multi-party signing: build unsigned tx with USER as proposer+authorizer
+            build_result = self.flow_client.build_unsigned_transaction(
+                cadence_code=tx_code,
+                arguments=arguments,
+                user_address=user_address,
+                user_key_index=0,
+            )
 
-            if error:
+            # Import _queue_background_tx helper from api module
+            from relay.api import _queue_background_tx_direct
+            queued = _queue_background_tx_direct(
+                user_address=user_address,
+                build_result=build_result,
+                description=f"Send {amount} FLOW to {to_address}",
+            )
+
+            if queued:
                 return {
-                    "success": False,
-                    "tx_id": tx_id,
-                    "status": status,
-                    "error": error,
+                    "success": True,
+                    "pending_approval": True,
                     "amount": amount,
                     "to": to_address,
+                    "from": user_address,
+                    "message": (
+                        f"Transaction to send {amount} FLOW to {to_address} has been queued "
+                        f"for approval. The user's browser will sign and submit it automatically. "
+                        f"Funds will come from the user's wallet ({user_address}), not the sponsor."
+                    ),
                 }
+            else:
+                raise RuntimeError("Failed to queue transaction for user signing")
 
-            return {
-                "success": True,
-                "tx_id": tx_id,
-                "status": status,
-                "amount": amount,
-                "to": to_address,
-                "message": f"Successfully sent {amount} FLOW to {to_address}",
-                "flowscan_url": self._flowscan_url(tx_id),
-            }
         except Exception as e:
             raise RuntimeError(f"Failed to send FLOW tokens: {e}")
 
-    def _tool_execute_transaction(self, params: Dict) -> Dict:
-        """Execute a custom Cadence transaction."""
+    def _tool_execute_transaction(self, params: Dict, user_address: str = None) -> Dict:
+        """Execute a custom Cadence transaction on the USER's account (not the sponsor).
+
+        Uses multi-party signing: user is proposer+authorizer, sponsor is payer.
+        """
         tx_code = params.get("transaction_code", "")
         arguments = params.get("arguments", [])
 
+        if not user_address:
+            raise ValueError("User address is required for transactions")
         if not tx_code:
             raise ValueError("'transaction_code' parameter is required")
 
@@ -743,31 +780,35 @@ transaction(amount: UFix64, to: Address) {
             raise RuntimeError("Flow REST client not configured — cannot send transactions")
 
         try:
-            result = self.flow_client.send_transaction(tx_code, arguments)
+            # Multi-party signing: build unsigned tx with USER as proposer+authorizer
+            build_result = self.flow_client.build_unsigned_transaction(
+                cadence_code=tx_code,
+                arguments=arguments,
+                user_address=user_address,
+                user_key_index=0,
+            )
 
-            status = result.get("status", "UNKNOWN")
-            tx_id = result.get("txId", "")
-            error = result.get("error", "")
+            from relay.api import _queue_background_tx_direct
+            queued = _queue_background_tx_direct(
+                user_address=user_address,
+                build_result=build_result,
+                description="Custom Cadence transaction",
+            )
 
-            if error:
+            if queued:
                 return {
-                    "success": False,
-                    "tx_id": tx_id,
-                    "status": status,
-                    "error": error,
+                    "success": True,
+                    "pending_approval": True,
+                    "signer": user_address,
+                    "message": (
+                        "Transaction has been queued for approval. "
+                        "The user's browser will sign and submit it automatically. "
+                        f"The transaction will execute on the user's account ({user_address})."
+                    ),
                 }
+            else:
+                raise RuntimeError("Failed to queue transaction for user signing")
 
-            events = result.get("events", [])
-            event_summary = [e.get("type", "unknown") for e in events[:5]]
-
-            return {
-                "success": True,
-                "tx_id": tx_id,
-                "status": status,
-                "events": event_summary,
-                "message": f"Transaction sealed successfully",
-                "flowscan_url": self._flowscan_url(tx_id),
-            }
         except Exception as e:
             raise RuntimeError(f"Failed to execute transaction: {e}")
 

@@ -473,7 +473,8 @@ async def background_task_executor():
                             for tc in tool_calls:
                                 logging.info(f"  Task {task_id} executing tool: {tc['name']}")
                                 tool_result = agent_tool_executor.execute(
-                                    tc["name"], tc.get("input", tc.get("arguments", {}))
+                                    tc["name"], tc.get("input", tc.get("arguments", {})),
+                                    user_address=task_user_addr,
                                 )
                                 task_messages.append({
                                     "role": "tool",
@@ -775,7 +776,7 @@ async def startup():
                         tool_name = tc.get("name", "")
                         tool_input = tc.get("input", tc.get("arguments", {}))
                         logging.info(f"  Sub-agent {sub_id} executing tool: {tool_name}")
-                        tool_result = agent_tool_executor.execute(tool_name, tool_input)
+                        tool_result = agent_tool_executor.execute(tool_name, tool_input, user_address=user_address)
                         sub_messages.append({
                             "role": "tool",
                             "content": tool_result.to_message(),
@@ -1531,6 +1532,42 @@ def _queue_background_tx(user_address: str, cadence_path: str, tx_args_json: str
         return False
 
 
+def _queue_background_tx_direct(user_address: str, build_result: dict, description: str = ""):
+    """Queue an already-built unsigned transaction for user signing.
+
+    Unlike _queue_background_tx which builds from a Cadence file path, this
+    takes a pre-built transaction result (from build_unsigned_transaction).
+    Used by the tool executor for financial operations (send_flow_tokens, etc.)
+    where the transaction is built in the tool code itself.
+
+    IMPORTANT: This function NEVER falls back to sponsor signing. Financial
+    tools MUST be signed by the user — if queuing fails, the operation fails.
+    """
+    if not user_address:
+        return False
+
+    try:
+        build_id = str(_uuid.uuid4())
+        _pending_tx_builds[build_id] = {
+            "build_result": build_result,
+            "user_address": user_address,
+            "created_at": time.time(),
+        }
+        if user_address not in _pending_bg_transactions:
+            _pending_bg_transactions[user_address] = []
+        _pending_bg_transactions[user_address].append({
+            "txBuildId": build_id,
+            "payloadHex": build_result.get("payloadHex", ""),
+            "description": description,
+            "createdAt": time.time(),
+        })
+        logging.info(f"Tool TX queued for {user_address}: {description} (build_id={build_id[:8]}...)")
+        return True
+    except Exception as e:
+        logging.error(f"Failed to queue tool transaction for {user_address}: {e}")
+        return False
+
+
 class BuildTransactionRequest(BaseModel):
     transactionPath: str  # Path to .cdc file relative to project dir
     arguments: List[Dict] = []  # Cadence arguments [{"type": "...", "value": "..."}]
@@ -2116,6 +2153,19 @@ async def send_message(req: SendMessageRequest, request: Request):
             "accomplish tasks that your tools can handle directly. "
             "You are private to your owner's account. "
             "Be helpful, concise, and mention on-chain features when relevant.\n\n"
+        )
+
+        # Tell the agent the user's address so it can check their balance
+        if address:
+            system_content += (
+                f"OWNER INFO: The user's Flow address is {address}. "
+                "When they ask about 'my balance' or 'my account', use this address with query_balance. "
+                "Financial tools (send_flow_tokens, execute_transaction) operate on the USER's account — "
+                "funds come from their wallet, NOT the sponsor. Transactions are queued for the user's "
+                "browser to sign automatically.\n\n"
+            )
+
+        system_content += (
             "IMPORTANT — Cadence 1.0 syntax: If you write any Cadence scripts or code, "
             "use `access(all)` instead of `pub`. For example: `access(all) fun main(): String {}`. "
             "The `pub` keyword is no longer valid in Cadence 1.0.\n\n"
@@ -2291,7 +2341,7 @@ async def send_message(req: SendMessageRequest, request: Request):
                 tool_name = tc.get("name", "")
                 tool_input = tc.get("input", tc.get("arguments", {}))
                 logging.info(f"  Executing tool: {tool_name} with {json.dumps(tool_input)[:200]}")
-                tool_result = agent_tool_executor.execute(tool_name, tool_input)
+                tool_result = agent_tool_executor.execute(tool_name, tool_input, user_address=address)
                 logging.info(f"  Tool result: success={tool_result.success}, time={tool_result.execution_time_ms}ms")
                 messages.append({
                     "role": "tool",
