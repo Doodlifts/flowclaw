@@ -164,12 +164,10 @@ class EncryptionManager:
                 cipher = ChaCha20Poly1305(self.key)
                 ciphertext = cipher.encrypt(nonce, plaintext_bytes, None)
             except ImportError:
-                # Last resort: XOR-based placeholder for development
-                # NOT SECURE — only for PoC testing without crypto libraries
-                logging.warning("No crypto library available! Using XOR placeholder (NOT SECURE)")
-                nonce = secrets.token_bytes(self.NONCE_SIZE)
-                key_stream = self._expand_key(self.key, nonce, len(plaintext_bytes))
-                ciphertext = bytes(a ^ b for a, b in zip(plaintext_bytes, key_stream))
+                raise RuntimeError(
+                    "No crypto library available (need PyNaCl or cryptography). "
+                    "Install with: pip install pynacl  OR  pip install cryptography"
+                )
 
         return {
             "ciphertext": base64.b64encode(ciphertext).decode("ascii"),
@@ -203,9 +201,10 @@ class EncryptionManager:
                 cipher = ChaCha20Poly1305(self.key)
                 plaintext_bytes = cipher.decrypt(nonce, ciphertext, None)
             except ImportError:
-                # XOR fallback (matches encrypt fallback)
-                key_stream = self._expand_key(self.key, nonce, len(ciphertext))
-                plaintext_bytes = bytes(a ^ b for a, b in zip(ciphertext, key_stream))
+                raise RuntimeError(
+                    "No crypto library available (need PyNaCl or cryptography). "
+                    "Install with: pip install pynacl  OR  pip install cryptography"
+                )
 
         plaintext = plaintext_bytes.decode("utf-8")
 

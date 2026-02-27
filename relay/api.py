@@ -91,7 +91,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "Authorization", "X-API-Key", "X-Request-ID"],
 )
 
@@ -731,25 +731,22 @@ async def startup():
                 }
                 # Commit to chain (high importance = always commits)
                 try:
-                    if encryption and encryption.is_configured:
-                        enc = encryption.encrypt(mem_content)
-                    else:
-                        enc = {
-                            "ciphertext": mem_content[:500],  # Truncate for on-chain
-                            "nonce": "",
-                            "plaintextHash": cog_entry.content_hash,
-                            "keyFingerprint": "",
-                            "algorithm": 0,
-                        }
+                    if not encryption or not encryption.is_configured:
+                        logging.error(
+                            f"Encryption not configured — skipping on-chain storage for sub-agent memory "
+                            f"(refusing to store plaintext on-chain)"
+                        )
+                        raise RuntimeError("Encryption required for on-chain storage")
+                    enc = encryption.encrypt(mem_content)
                     tags_array = [{"type": "String", "value": t} for t in mem_tags]
                     tx_args = json.dumps([
                         {"type": "String", "value": mem_key},
-                        {"type": "String", "value": enc.get("ciphertext", mem_content[:500])},
-                        {"type": "String", "value": enc.get("nonce", "")},
-                        {"type": "String", "value": cog_entry.content_hash},
+                        {"type": "String", "value": enc["ciphertext"]},
+                        {"type": "String", "value": enc["nonce"]},
+                        {"type": "String", "value": enc["plaintextHash"]},
                         {"type": "Array", "value": tags_array},
-                        {"type": "String", "value": enc.get("keyFingerprint", "")},
-                        {"type": "UInt8", "value": str(enc.get("algorithm", 0))},
+                        {"type": "String", "value": enc["keyFingerprint"]},
+                        {"type": "UInt8", "value": str(enc["algorithm"])},
                         {"type": "UInt8", "value": str(memory_type)},
                         {"type": "UInt8", "value": str(importance)},
                         {"type": "UInt8", "value": str(emotional_weight)},
@@ -1280,6 +1277,49 @@ async def sync_extensions_endpoint():
 
 
 # -----------------------------------------------------------------------
+# Content Encryption (for multi-party signing)
+# -----------------------------------------------------------------------
+
+
+class EncryptContentRequest(BaseModel):
+    content: str  # Plaintext content to encrypt
+
+
+@app.post("/encrypt")
+async def encrypt_content(req: EncryptContentRequest, request: Request):
+    """Encrypt content using the relay's encryption key.
+
+    Used by the frontend before multi-party signed on-chain transactions.
+    The frontend sends plaintext here, gets back encrypted payload fields,
+    then uses those fields in the Cadence transaction arguments.
+
+    This ensures messages are ALWAYS encrypted before touching the chain,
+    even though the user (not the relay) signs the transaction.
+    """
+    _get_authed_address(request)  # Auth required
+
+    if not encryption or not encryption.is_configured:
+        raise HTTPException(
+            status_code=503,
+            detail="Encryption not configured on relay. On-chain storage requires encryption."
+        )
+
+    try:
+        enc = encryption.encrypt(req.content)
+        return {
+            "ciphertext": enc["ciphertext"],
+            "nonce": enc["nonce"],
+            "plaintextHash": enc["plaintextHash"],
+            "keyFingerprint": enc["keyFingerprint"],
+            "algorithm": enc["algorithm"],
+            "plaintextLength": enc["plaintextLength"],
+        }
+    except Exception as e:
+        logging.error(f"Encryption failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Encryption failed: {str(e)}")
+
+
+# -----------------------------------------------------------------------
 # Multi-Party Transaction Signing
 # -----------------------------------------------------------------------
 
@@ -1557,17 +1597,13 @@ def _parse_and_store_memories(response_content: str) -> str:
         should_commit = importance >= 7 or memory_type == MemoryType.SELF_MODEL
         if should_commit:
             try:
-                if encryption and encryption.is_configured:
-                    enc = encryption.encrypt(content.strip())
-                else:
-                    enc = {
-                        "ciphertext": content.strip(),
-                        "nonce": "",
-                        "plaintextHash": cog_entry.content_hash,
-                        "keyFingerprint": "",
-                        "algorithm": 0,
-                        "plaintextLength": len(content),
-                    }
+                if not encryption or not encryption.is_configured:
+                    logging.error(
+                        f"Encryption not configured — skipping on-chain storage for memory '{key}' "
+                        f"(refusing to store plaintext on-chain)"
+                    )
+                    continue
+                enc = encryption.encrypt(content.strip())
                 tags_array = [{"type": "String", "value": t} for t in tags]
 
                 # Use cognitive store transaction (stores in both AgentMemory + CognitiveMemory)
@@ -2484,21 +2520,14 @@ async def store_memory(req: StoreMemoryRequest):
     global _next_memory_id
 
     try:
-        # Encrypt the content
-        if encryption and encryption.is_configured:
-            enc = encryption.encrypt(req.content)
-            encrypted = True
-        else:
-            enc = {
-                "ciphertext": req.content,
-                "nonce": "",
-                "plaintextHash": hashlib.sha256(req.content.encode()).hexdigest(),
-                "keyFingerprint": "",
-                "algorithm": 0,
-                "plaintextLength": len(req.content),
-            }
-            encrypted = False
-            logging.warning("Encryption not configured — storing plaintext memory")
+        # Encrypt the content — REQUIRED for on-chain storage
+        if not encryption or not encryption.is_configured:
+            raise HTTPException(
+                status_code=503,
+                detail="Encryption not configured. Cannot store unencrypted content on-chain."
+            )
+        enc = encryption.encrypt(req.content)
+        encrypted = True
 
         # Build transaction arguments (9 params as per schema)
         # tags must be an array of {type, value} objects for Flow CLI

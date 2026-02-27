@@ -50,30 +50,36 @@ export const api = {
     return result;
   },
 
+  // Encrypt content via the relay's encryption key
+  async encryptContent(content) {
+    const res = await fetch(`${API_BASE}/encrypt`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ content }),
+    });
+    return handleResponse(res);
+  },
+
   // Internal: store a message on-chain (non-blocking)
+  // Content is ALWAYS encrypted via the relay before being sent to the chain.
+  // Block explorers only see ciphertext — never plaintext.
   async _storeMessageOnChain(sessionId, content) {
-    const contentHash = await this._sha256(content);
+    // Step 1: Encrypt content via relay (relay holds the encryption key)
+    const enc = await this.encryptContent(content);
+
+    // Step 2: Submit encrypted payload on-chain via multi-party signing
     await this.signAndSubmitTransaction(
       'cadence/transactions/send_message.cdc',
       [
         { type: 'UInt64', value: String(sessionId) },
-        { type: 'String', value: content.substring(0, 500) },  // ciphertext placeholder
-        { type: 'String', value: '' },                          // nonce
-        { type: 'String', value: contentHash },                 // plaintextHash
-        { type: 'String', value: '' },                          // keyFingerprint
-        { type: 'UInt8', value: '0' },                          // algorithm
-        { type: 'UInt64', value: String(content.length) },      // plaintextLength
+        { type: 'String', value: enc.ciphertext },             // encrypted content
+        { type: 'String', value: enc.nonce },                   // encryption nonce
+        { type: 'String', value: enc.plaintextHash },           // SHA-256 of plaintext
+        { type: 'String', value: enc.keyFingerprint || '' },    // key fingerprint
+        { type: 'UInt8', value: String(enc.algorithm || 0) },   // algorithm ID
+        { type: 'UInt64', value: String(enc.plaintextLength) }, // original length
       ]
     );
-  },
-
-  // SHA-256 hash helper
-  async _sha256(text) {
-    const encoder = new TextEncoder();
-    const data = encoder.encode(text);
-    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
   },
 
   async createSession(maxContextMessages = 4096) {
