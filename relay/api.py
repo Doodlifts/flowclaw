@@ -111,9 +111,12 @@ gas_sponsor: Optional[GasSponsor] = None
 start_time: float = 0
 # Multi-agent state
 agents_cache: Dict[int, Dict] = {}  # Empty — user creates agents after adding LLM provider
-active_agent_id: Optional[int] = None  # No agent selected until user creates one
+# Per-user active agent mapping: user_address -> agent_id (multi-user safe)
+_active_agent_per_user: Dict[str, Optional[int]] = {}
 # Per-agent user address mapping: agent_id -> user address (multi-user safe)
 _agent_user_map: Dict[int, str] = {}
+# Session owner mapping: session_id -> user_address (for filtering sessions by user)
+_session_owners: Dict[int, str] = {}
 session_messages: Dict[int, List[Dict]] = {}  # Local cache for PoC
 memory_cache: Dict[int, Dict] = {}  # Local cache for memory operations
 tasks_cache: Dict[int, Dict] = {}  # Local cache for task operations
@@ -147,7 +150,19 @@ def _load_tasks_cache():
             logging.info(f"Loaded {len(tasks_cache)} tasks from persistent cache")
     except Exception as e:
         logging.warning(f"Failed to load tasks cache: {e}")
-cognitive_engine: CognitiveMemoryEngine = CognitiveMemoryEngine()
+
+# Per-user cognitive engines: address -> CognitiveMemoryEngine (multi-user safe)
+_cognitive_engines: Dict[str, CognitiveMemoryEngine] = {}
+
+def _get_cognitive_engine(address: str = None) -> CognitiveMemoryEngine:
+    """Get or create a per-user cognitive memory engine.
+    If no address provided, use global '__global__' key for backward compatibility."""
+    if not address:
+        address = "__global__"
+    if address not in _cognitive_engines:
+        _cognitive_engines[address] = CognitiveMemoryEngine()
+    return _cognitive_engines[address]
+
 _next_hook_id: int = 1
 _next_extension_id: int = 1
 _next_execution_id: int = 1
@@ -172,6 +187,13 @@ def _get_authed_address(request: Request) -> str:
     if not data:
         raise HTTPException(status_code=401, detail="Invalid or expired session token")
     return data["address"]
+
+
+def _get_active_agent(address: str = None) -> Optional[int]:
+    """Get the active agent for a user. If no address, use global default."""
+    if not address:
+        address = "__global__"
+    return _active_agent_per_user.get(address)
 
 
 def _get_user_provider(address: str, provider_name: str = None) -> Optional[LLMProvider]:
@@ -533,7 +555,7 @@ async def background_task_executor():
 
 async def background_dream_cycle():
     """
-    Background dream cycle — runs every 6 hours.
+    Background dream cycle — runs every 6 hours per user.
     Consolidates memory: decay, bond formation, molecule detection,
     promotion of patterns, pruning of weak isolated memories.
     On Flow, we also trigger the on-chain dream cycle transaction.
@@ -542,42 +564,44 @@ async def background_dream_cycle():
         try:
             await asyncio.sleep(6 * 3600)  # Every 6 hours
 
-            if not cognitive_engine.entries:
-                continue
+            # Iterate over all per-user cognitive engines
+            for user_addr, cognitive_engine in _cognitive_engines.items():
+                if not cognitive_engine.entries:
+                    continue
 
-            logging.info("[Dream Cycle] Starting cognitive memory consolidation...")
-            result = cognitive_engine.run_dream_cycle()
+                logging.info(f"[Dream Cycle] Starting cognitive memory consolidation for user {user_addr}...")
+                result = cognitive_engine.run_dream_cycle()
 
-            # Best-effort on-chain dream cycle
-            try:
-                tx_args = json.dumps([
-                    {"type": "UFix64", "value": "0.15000000"},  # decay threshold
-                    {"type": "UInt64", "value": "3"},           # promotion threshold
-                ])
-                run_flow_tx("cadence/transactions/run_dream_cycle.cdc", tx_args)
-                logging.info("[Dream Cycle] On-chain dream cycle committed")
-            except Exception as e:
-                logging.warning(f"[Dream Cycle] On-chain commit failed: {e}")
+                # Best-effort on-chain dream cycle
+                try:
+                    tx_args = json.dumps([
+                        {"type": "UFix64", "value": "0.15000000"},  # decay threshold
+                        {"type": "UInt64", "value": "3"},           # promotion threshold
+                    ])
+                    run_flow_tx("cadence/transactions/run_dream_cycle.cdc", tx_args)
+                    logging.info(f"[Dream Cycle] On-chain dream cycle committed for user {user_addr}")
+                except Exception as e:
+                    logging.warning(f"[Dream Cycle] On-chain commit failed for user {user_addr}: {e}")
 
-            # Best-effort commit new bonds on-chain
-            for from_id, bond_list in cognitive_engine.bonds.items():
-                for bond in bond_list:
-                    try:
-                        tx_args = json.dumps([
-                            {"type": "UInt64", "value": str(bond.from_id)},
-                            {"type": "UInt64", "value": str(bond.to_id)},
-                            {"type": "UInt8", "value": str(bond.bond_type)},
-                            {"type": "UFix64", "value": f"{bond.strength:.8f}"},
-                        ])
-                        run_flow_tx("cadence/transactions/create_memory_bond.cdc", tx_args)
-                    except Exception:
-                        pass  # Best-effort
+                # Best-effort commit new bonds on-chain
+                for from_id, bond_list in cognitive_engine.bonds.items():
+                    for bond in bond_list:
+                        try:
+                            tx_args = json.dumps([
+                                {"type": "UInt64", "value": str(bond.from_id)},
+                                {"type": "UInt64", "value": str(bond.to_id)},
+                                {"type": "UInt8", "value": str(bond.bond_type)},
+                                {"type": "UFix64", "value": f"{bond.strength:.8f}"},
+                            ])
+                            run_flow_tx("cadence/transactions/create_memory_bond.cdc", tx_args)
+                        except Exception:
+                            pass  # Best-effort
 
-            logging.info(
-                f"[Dream Cycle] Complete: decayed={result.memories_decayed} "
-                f"pruned={result.memories_pruned} bonds={result.bonds_created} "
-                f"molecules={result.molecules_formed} promotions={result.promotions}"
-            )
+                logging.info(
+                    f"[Dream Cycle] User {user_addr} complete: decayed={result.memories_decayed} "
+                    f"pruned={result.memories_pruned} bonds={result.bonds_created} "
+                    f"molecules={result.molecules_formed} promotions={result.promotions}"
+                )
 
         except asyncio.CancelledError:
             logging.info("Dream cycle cancelled")
@@ -859,14 +883,15 @@ async def startup():
             agents_cache[sub_id]["lastResult"] = f"Execution error: {e}"
 
     # Spawn callback for LLM-initiated sub-agent creation
-    def _spawn_sub_agent_callback(name: str, description: str, ttl_seconds: float = None):
-        """Called by AgentToolExecutor when the LLM wants to spawn a sub-agent."""
-        parent_id = active_agent_id or 1
+    def _spawn_sub_agent_callback(name: str, description: str, ttl_seconds: float = None, parent_user_addr: str = None):
+        """Called by AgentToolExecutor when the LLM wants to spawn a sub-agent.
+        parent_user_addr: the user address from whose context this spawn was triggered."""
+        parent_id = _get_active_agent(parent_user_addr) or 1
         expires_at = time.time() + ttl_seconds if ttl_seconds else None
         sub_id = max(agents_cache.keys()) + 1 if agents_cache else 3
         # Inherit provider/model/userAddress from parent agent (multi-user safe)
         parent_entry = agents_cache.get(parent_id, {})
-        user_addr = parent_entry.get("userAddress") or _agent_user_map.get(parent_id)
+        user_addr = parent_entry.get("userAddress") or _agent_user_map.get(parent_id) or parent_user_addr
         agents_cache[sub_id] = {
             "name": name,
             "description": description,
@@ -1003,18 +1028,24 @@ async def startup():
     logging.info(f"  Syncing on-chain state...")
     await sync_all_state()
 
-    # Migrate existing memories into cognitive engine
+    # Migrate existing memories into cognitive engines (per-user)
     if memory_cache:
-        logging.info(f"  Ingesting {len(memory_cache)} existing memories into cognitive engine...")
+        logging.info(f"  Ingesting {len(memory_cache)} existing memories into cognitive engines...")
         for mid, entry in memory_cache.items():
-            cognitive_engine.ingest_flat_memory(
+            # Get user address from memory or use global
+            user_addr = entry.get("userAddress") or "__global__"
+            engine = _get_cognitive_engine(user_addr)
+            engine.ingest_flat_memory(
                 memory_id=mid,
                 key=entry.get("key", ""),
                 content=entry.get("content", ""),
                 tags=entry.get("tags", []),
                 source=entry.get("source", "sync"),
             )
-        logging.info(f"  Cognitive engine: {len(cognitive_engine.entries)} memories, {cognitive_engine.get_stats()['totalBonds']} bonds")
+        # Log stats for all engines
+        for addr, engine in _cognitive_engines.items():
+            stats = engine.get_stats()
+            logging.info(f"  Cognitive engine [{addr}]: {len(engine.entries)} memories, {stats['totalBonds']} bonds")
 
     logging.info(f"FlowClaw Relay API ready on http://0.0.0.0:8000")
 
@@ -1569,7 +1600,7 @@ async def create_session(req: CreateSessionRequest):
     return {"sessionId": session_id, "success": True, "txResult": "off-chain"}
 
 
-def _build_memory_context(user_message: str) -> str:
+def _build_memory_context(user_message: str, user_address: str = None) -> str:
     """
     Build memory context using the Cognitive Memory Engine.
 
@@ -1581,6 +1612,11 @@ def _build_memory_context(user_message: str) -> str:
 
     Falls back to legacy keyword matching if cognitive engine is empty.
     """
+
+    # Get the user's cognitive engine
+    if not user_address:
+        user_address = "__global__"
+    cognitive_engine = _get_cognitive_engine(user_address)
 
     # Use cognitive engine if it has memories
     if cognitive_engine.entries:
@@ -1641,7 +1677,7 @@ def _clean_markdown(text: str) -> str:
     return text.strip()
 
 
-def _parse_and_store_memories(response_content: str) -> str:
+def _parse_and_store_memories(response_content: str, user_address: str = None) -> str:
     """
     Parse STORE_MEMORY directives from agent response and store them
     in the Cognitive Memory Engine + on-chain.
@@ -1660,6 +1696,11 @@ def _parse_and_store_memories(response_content: str) -> str:
     pattern = r'\[STORE_MEMORY\s+key="([^"]+)"(?:\s+tags="([^"]*)")?\]:\s*(.+?)(?:\n|$)'
     matches = re.findall(pattern, response_content)
 
+    # Get user's cognitive engine
+    if not user_address:
+        user_address = "__global__"
+    cognitive_engine = _get_cognitive_engine(user_address)
+
     for key, tags_str, content in matches:
         tags = [t.strip() for t in tags_str.split(",") if t.strip()] if tags_str else []
 
@@ -1671,7 +1712,7 @@ def _parse_and_store_memories(response_content: str) -> str:
         logging.info(
             f"Agent auto-storing memory: key={key}, "
             f"type={MemoryType(memory_type).name}, importance={importance}, "
-            f"content={content[:50]}..."
+            f"user={user_address}, content={content[:50]}..."
         )
 
         # Store in cognitive engine (creates bonds automatically)
@@ -1685,7 +1726,7 @@ def _parse_and_store_memories(response_content: str) -> str:
             emotional_weight=emotional_weight,
         )
 
-        # Also store in legacy cache for backward compat
+        # Also store in legacy cache for backward compat (with userAddress for filtering)
         memory_id = cog_entry.memory_id
         memory_cache[memory_id] = {
             "key": key,
@@ -1696,6 +1737,7 @@ def _parse_and_store_memories(response_content: str) -> str:
             "contentHash": cog_entry.content_hash,
             "memoryType": memory_type,
             "importance": importance,
+            "userAddress": user_address,
         }
 
         # Selective on-chain commitment: only commit important memories
@@ -1780,9 +1822,11 @@ async def send_message(req: SendMessageRequest, request: Request):
     try:
         address = _get_authed_address(request)
         # Store user address on the active agent for multi-user BYOK support
-        if active_agent_id and active_agent_id in agents_cache:
-            agents_cache[active_agent_id]["userAddress"] = address
-        _agent_user_map[active_agent_id or 0] = address
+        user_active = _get_active_agent(address)
+        if user_active and user_active in agents_cache:
+            agents_cache[user_active]["userAddress"] = address
+        if user_active:
+            _agent_user_map[user_active] = address
         provider = _get_user_provider(address, req.provider)
     except HTTPException:
         pass  # No auth token — fall back to global providers
@@ -1807,7 +1851,10 @@ async def send_message(req: SendMessageRequest, request: Request):
     if req.sessionId not in session_messages:
         # Create a new off-chain session for this ID
         session_messages[req.sessionId] = []
-        logging.info(f"Auto-created off-chain session {req.sessionId}")
+        # Track session owner for per-user filtering
+        if address:
+            _session_owners[req.sessionId] = address
+        logging.info(f"Auto-created off-chain session {req.sessionId} for user {address}")
 
     logging.info(f"Session ID for this message: {req.sessionId}")
 
@@ -1840,8 +1887,8 @@ async def send_message(req: SendMessageRequest, request: Request):
                 "`web_fetch` to fetch data from APIs, or `query_balance` to check balances.\n\n"
             )
 
-        # Inject relevant memories into system prompt
-        memory_context = _build_memory_context(req.content)
+        # Inject relevant memories into system prompt (user-specific)
+        memory_context = _build_memory_context(req.content, address)
         if memory_context:
             system_content += memory_context
 
@@ -1868,8 +1915,8 @@ async def send_message(req: SendMessageRequest, request: Request):
 
         session_messages[req.sessionId] = [{"role": "system", "content": system_content}]
     else:
-        # Update system prompt with fresh memory context for ongoing sessions
-        memory_context = _build_memory_context(req.content)
+        # Update system prompt with fresh memory context for ongoing sessions (user-specific)
+        memory_context = _build_memory_context(req.content, address)
         if memory_context and session_messages[req.sessionId]:
             old_system = session_messages[req.sessionId][0].get("content", "")
             # Replace or append memory section
@@ -1895,9 +1942,10 @@ async def send_message(req: SendMessageRequest, request: Request):
                 f"Result:\n{info['lastResult']}\n"
             )
 
-    # Second: pull from cognitive memory (survives relay restarts)
-    if cognitive_engine.entries:
-        for entry in cognitive_engine.entries.values():
+    # Second: pull from cognitive memory (survives relay restarts, user-specific)
+    user_cognitive_engine = _get_cognitive_engine(address)
+    if user_cognitive_engine.entries:
+        for entry in user_cognitive_engine.entries.values():
             if entry.source == "sub-agent" and entry.key not in seen_keys:
                 sub_agent_results.append(
                     f"### {entry.key} (from memory)\n"
@@ -1946,8 +1994,10 @@ async def send_message(req: SendMessageRequest, request: Request):
                 resolved_model = default_config["default_model"]
         except Exception:
             pass
-    if not resolved_model and active_agent_id and active_agent_id in agents_cache:
-        resolved_model = agents_cache[active_agent_id].get("model", "")
+    # Get the user's active agent and check its model config
+    active_agent = _get_active_agent(address)
+    if not resolved_model and active_agent and active_agent in agents_cache:
+        resolved_model = agents_cache[active_agent].get("model", "")
     if not resolved_model:
         # Infer sensible default from provider type
         if isinstance(provider, AnthropicProvider):
@@ -2007,8 +2057,8 @@ async def send_message(req: SendMessageRequest, request: Request):
         # Final response
         response_content = result.get("content", "")
 
-        # Parse and auto-store any memories the agent decided to save
-        response_content = _parse_and_store_memories(response_content)
+        # Parse and auto-store any memories the agent decided to save (user-specific)
+        response_content = _parse_and_store_memories(response_content, address)
 
         # Save to session
         session_messages[req.sessionId].append({
@@ -2033,11 +2083,23 @@ async def send_message(req: SendMessageRequest, request: Request):
 
 
 @app.get("/sessions")
-async def get_sessions():
-    """List sessions from local cache."""
-    # For PoC, return sessions we know about from the in-memory cache
+async def get_sessions(request: Request):
+    """List sessions owned by the authenticated user."""
+    # Try to get user address for filtering
+    user_address = None
+    try:
+        user_address = _get_authed_address(request)
+    except HTTPException:
+        pass  # No auth token — fall back to returning all (single-user mode)
+
     sessions = []
     for sid, msgs in session_messages.items():
+        # Filter: if user is authenticated, only return their sessions
+        if user_address:
+            session_user = _session_owners.get(sid)
+            if session_user and session_user != user_address:
+                continue  # Skip sessions belonging to other users
+
         non_system = [m for m in msgs if m["role"] != "system"]
         sessions.append({
             "id": sid,
@@ -2051,8 +2113,24 @@ async def get_sessions():
 
 
 @app.get("/session/{session_id}/messages")
-async def get_session_messages(session_id: int):
-    """Fetch messages for a session."""
+async def get_session_messages(session_id: int, request: Request):
+    """Fetch messages for a session (must own the session)."""
+    if session_id not in session_messages:
+        raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
+
+    # Try to get user address for ownership verification
+    user_address = None
+    try:
+        user_address = _get_authed_address(request)
+    except HTTPException:
+        pass  # No auth token — allow access in single-user mode
+
+    # Verify ownership (if user authenticated)
+    if user_address:
+        session_user = _session_owners.get(session_id)
+        if session_user and session_user != user_address:
+            raise HTTPException(status_code=403, detail="You do not own this session")
+
     msgs = session_messages.get(session_id, [])
     result = []
     for i, m in enumerate(msgs):
@@ -2074,9 +2152,20 @@ async def get_session_messages(session_id: int):
 
 
 @app.get("/memory")
-async def get_memory():
-    """Fetch memory entries with cognitive metadata."""
-    # If cognitive engine has data, use it (richer than flat cache)
+async def get_memory(request: Request):
+    """Fetch memory entries owned by the authenticated user."""
+    # Try to get user address
+    user_address = None
+    try:
+        user_address = _get_authed_address(request)
+    except HTTPException:
+        pass  # No auth token — use global
+
+    if not user_address:
+        user_address = "__global__"
+
+    # Get user's cognitive engine
+    cognitive_engine = _get_cognitive_engine(user_address)
     if cognitive_engine.entries:
         return cognitive_engine.export_entries()
 
@@ -2100,8 +2189,19 @@ async def get_memory():
 # -----------------------------------------------------------------------
 
 @app.get("/cognitive/state")
-async def get_cognitive_state():
+async def get_cognitive_state(request: Request):
     """Full cognitive memory state: entries, bonds, molecules, stats."""
+    # Try to get user address
+    user_address = None
+    try:
+        user_address = _get_authed_address(request)
+    except HTTPException:
+        pass  # No auth token — use global
+
+    if not user_address:
+        user_address = "__global__"
+
+    cognitive_engine = _get_cognitive_engine(user_address)
     return {
         "stats": cognitive_engine.get_stats(),
         "entries": cognitive_engine.export_entries(),
@@ -2111,14 +2211,37 @@ async def get_cognitive_state():
 
 
 @app.get("/cognitive/stats")
-async def get_cognitive_stats():
+async def get_cognitive_stats(request: Request):
     """Quick cognitive memory statistics."""
+    # Try to get user address
+    user_address = None
+    try:
+        user_address = _get_authed_address(request)
+    except HTTPException:
+        pass  # No auth token — use global
+
+    if not user_address:
+        user_address = "__global__"
+
+    cognitive_engine = _get_cognitive_engine(user_address)
     return cognitive_engine.get_stats()
 
 
 @app.get("/cognitive/retrieve")
-async def cognitive_retrieve(query: str, max_results: int = 10):
+async def cognitive_retrieve(query: str, max_results: int = 10, request: Request = None):
     """Molecular retrieval: find semantically coherent memory cluster for a query."""
+    # Try to get user address
+    user_address = None
+    if request:
+        try:
+            user_address = _get_authed_address(request)
+        except HTTPException:
+            pass  # No auth token — use global
+
+    if not user_address:
+        user_address = "__global__"
+
+    cognitive_engine = _get_cognitive_engine(user_address)
     results = cognitive_engine.retrieve_molecular(query, max_results=max_results)
     return [
         {
@@ -2138,8 +2261,19 @@ async def cognitive_retrieve(query: str, max_results: int = 10):
 
 
 @app.post("/cognitive/dream")
-async def trigger_dream_cycle():
-    """Manually trigger a dream cycle consolidation."""
+async def trigger_dream_cycle(request: Request):
+    """Manually trigger a dream cycle consolidation for authenticated user."""
+    # Try to get user address
+    user_address = None
+    try:
+        user_address = _get_authed_address(request)
+    except HTTPException:
+        pass  # No auth token — use global
+
+    if not user_address:
+        user_address = "__global__"
+
+    cognitive_engine = _get_cognitive_engine(user_address)
     if not cognitive_engine.entries:
         return {"message": "No memories to consolidate", "result": None}
 
@@ -2464,19 +2598,36 @@ async def get_provider_presets():
 # -----------------------------------------------------------------------
 
 @app.get("/agents")
-async def get_agents():
-    """List all agents for this account."""
+async def get_agents(request: Request):
+    """List agents owned by the authenticated user."""
     if not agents_cache:
         # No agents yet — user needs to create one after adding LLM provider
         return []
 
-    return [
-        {
+    # Try to get user address for filtering
+    user_address = None
+    try:
+        user_address = _get_authed_address(request)
+    except HTTPException:
+        pass  # No auth token — fall back to returning all (single-user mode)
+
+    result = []
+    for aid, info in agents_cache.items():
+        # Filter: if user is authenticated, only return their agents
+        if user_address:
+            agent_user = info.get("userAddress") or _agent_user_map.get(aid)
+            if agent_user and agent_user != user_address:
+                continue  # Skip agents belonging to other users
+
+        # Get active agent for this user
+        active_agent = _get_active_agent(user_address)
+
+        result.append({
             "id": aid,
             "name": info.get("name", ""),
             "description": info.get("description", ""),
             "isActive": info.get("isActive", True),
-            "isDefault": aid == active_agent_id,
+            "isDefault": aid == active_agent,
             "isSubAgent": info.get("isSubAgent", False),
             "parentAgentId": info.get("parentAgentId"),
             "expiresAt": info.get("expiresAt"),
@@ -2487,16 +2638,14 @@ async def get_agents():
             "status": info.get("status"),
             "lastResult": info.get("lastResult"),
             "completedAt": info.get("completedAt"),
-        }
-        for aid, info in agents_cache.items()
-    ]
+        })
+
+    return result
 
 
 @app.post("/agents/create")
 async def create_agent(req: CreateAgentRequest, request: Request):
     """Create a new agent in the account's AgentCollection."""
-    global active_agent_id
-
     try:
         # On-chain agent creation is handled via multi-party signing from the frontend.
         # The relay only manages the local cache; on-chain tx runs with user as authorizer.
@@ -2526,12 +2675,11 @@ async def create_agent(req: CreateAgentRequest, request: Request):
         }
         if creator_address:
             _agent_user_map[agent_id] = creator_address
+            # Set as active for this user if they have no active agent
+            if creator_address not in _active_agent_per_user or _active_agent_per_user[creator_address] is None:
+                _active_agent_per_user[creator_address] = agent_id
 
-        # Set as active if first additional agent
-        if active_agent_id is None:
-            active_agent_id = agent_id
-
-        logging.info(f"Agent created: ID={agent_id}, name={req.name}")
+        logging.info(f"Agent created: ID={agent_id}, name={req.name}, user={creator_address}")
         return {"agentId": agent_id, "success": True, "onChain": success}
 
     except Exception as e:
@@ -2589,35 +2737,84 @@ async def spawn_sub_agent(agent_id: int, req: SpawnSubAgentRequest, request: Req
 
 
 @app.post("/agents/{agent_id}/select")
-async def select_agent(agent_id: int):
-    """Set the active agent for the current session."""
-    global active_agent_id
-    active_agent_id = agent_id
-    logging.info(f"Active agent changed to: {agent_id}")
+async def select_agent(agent_id: int, request: Request):
+    """Set the active agent for the current user."""
+    # Try to get user address for per-user agent tracking
+    user_address = None
+    try:
+        user_address = _get_authed_address(request)
+    except HTTPException:
+        pass  # No auth token — use global key
+
+    if not user_address:
+        user_address = "__global__"
+
+    # Verify agent exists
+    if agent_id not in agents_cache:
+        raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
+
+    # Verify ownership (if user authenticated)
+    if user_address != "__global__":
+        agent_user = agents_cache[agent_id].get("userAddress") or _agent_user_map.get(agent_id)
+        if agent_user and agent_user != user_address:
+            raise HTTPException(status_code=403, detail="You do not own this agent")
+
+    _active_agent_per_user[user_address] = agent_id
+    logging.info(f"Active agent changed to: {agent_id} for user {user_address}")
     return {"activeAgentId": agent_id, "success": True}
 
 
 @app.delete("/agents/{agent_id}")
-async def delete_agent(agent_id: int):
-    """Remove an agent from the collection."""
-    global active_agent_id
+async def delete_agent(agent_id: int, request: Request):
+    """Remove an agent from the collection (must own the agent)."""
+    if agent_id not in agents_cache:
+        raise HTTPException(status_code=404, detail="Agent not found")
 
-    if agent_id in agents_cache:
-        del agents_cache[agent_id]
-        if active_agent_id == agent_id:
-            active_agent_id = next(iter(agents_cache), None)
-        logging.info(f"Agent deleted: ID={agent_id}")
-        return {"success": True}
+    # Try to get user address for ownership verification
+    user_address = None
+    try:
+        user_address = _get_authed_address(request)
+    except HTTPException:
+        pass  # No auth token — allow deletion in single-user mode
 
-    raise HTTPException(status_code=404, detail="Agent not found")
+    # Verify ownership (if user authenticated)
+    if user_address:
+        agent_user = agents_cache[agent_id].get("userAddress") or _agent_user_map.get(agent_id)
+        if agent_user and agent_user != user_address:
+            raise HTTPException(status_code=403, detail="You do not own this agent")
+
+    del agents_cache[agent_id]
+    if agent_id in _agent_user_map:
+        del _agent_user_map[agent_id]
+
+    # Update active agent for all users
+    for addr in list(_active_agent_per_user.keys()):
+        if _active_agent_per_user.get(addr) == agent_id:
+            _active_agent_per_user[addr] = next(iter(agents_cache), None)
+
+    logging.info(f"Agent deleted: ID={agent_id}, user={user_address}")
+    return {"success": True}
 
 
 @app.get("/tasks")
-async def get_tasks():
-    """Fetch scheduled tasks from on-chain + local cache."""
-    # Return cached tasks from operations performed through the API
-    return [
-        {
+async def get_tasks(request: Request):
+    """Fetch scheduled tasks owned by the authenticated user."""
+    # Try to get user address for filtering
+    user_address = None
+    try:
+        user_address = _get_authed_address(request)
+    except HTTPException:
+        pass  # No auth token — fall back to returning all (single-user mode)
+
+    result = []
+    for tid, entry in tasks_cache.items():
+        # Filter: if user is authenticated, only return their tasks
+        if user_address:
+            task_user = entry.get("userAddress")
+            if task_user and task_user != user_address:
+                continue  # Skip tasks belonging to other users
+
+        result.append({
             "id": tid,
             "name": entry["name"],
             "description": entry.get("description", ""),
@@ -2629,9 +2826,9 @@ async def get_tasks():
             "isRecurring": entry.get("isRecurring", False),
             "isActive": entry.get("isActive", True),
             "executionCount": entry.get("executionCount", 0),
-        }
-        for tid, entry in tasks_cache.items()
-    ]
+        })
+
+    return result
 
 
 @app.get("/hooks")
@@ -2654,9 +2851,19 @@ async def get_hooks():
 # -----------------------------------------------------------------------
 
 @app.post("/memory/store")
-async def store_memory(req: StoreMemoryRequest):
-    """Store a memory entry on-chain with encryption."""
+async def store_memory(req: StoreMemoryRequest, request: Request):
+    """Store a memory entry on-chain with encryption (user-specific)."""
     global _next_memory_id
+
+    # Try to get user address
+    user_address = None
+    try:
+        user_address = _get_authed_address(request)
+    except HTTPException:
+        pass  # No auth token — use global
+
+    if not user_address:
+        user_address = "__global__"
 
     try:
         # Encrypt the content — REQUIRED for on-chain storage
@@ -2688,10 +2895,11 @@ async def store_memory(req: StoreMemoryRequest):
         success = result is not None and ("sealed" in result.lower() or "success" in result.lower())
 
         if success:
-            # Classify and store in cognitive engine
+            # Classify and store in user's cognitive engine
             memory_type, importance, emotional_weight = CognitiveMemoryEngine.classify_memory(
                 req.key, req.content, req.tags or []
             )
+            cognitive_engine = _get_cognitive_engine(user_address)
             cog_entry = cognitive_engine.store(
                 key=req.key,
                 content=req.content if not encrypted else "[encrypted]",
@@ -2703,7 +2911,7 @@ async def store_memory(req: StoreMemoryRequest):
             )
             cog_entry.on_chain = True
 
-            # Also cache in legacy system
+            # Also cache in legacy system (with userAddress for filtering)
             memory_id = cog_entry.memory_id
             memory_cache[memory_id] = {
                 "key": req.key,
@@ -2714,6 +2922,7 @@ async def store_memory(req: StoreMemoryRequest):
                 "contentHash": enc["plaintextHash"],
                 "memoryType": memory_type,
                 "importance": importance,
+                "userAddress": user_address,
             }
             logging.info(
                 f"Memory stored: ID={memory_id}, key={req.key}, "
@@ -2815,8 +3024,24 @@ async def schedule_task(req: ScheduleTaskRequest, request: Request):
 
 
 @app.post("/tasks/{task_id}/cancel")
-async def cancel_task(task_id: int):
-    """Cancel a scheduled task."""
+async def cancel_task(task_id: int, request: Request):
+    """Cancel a scheduled task (must own the task)."""
+    if task_id not in tasks_cache:
+        raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+
+    # Try to get user address for ownership verification
+    user_address = None
+    try:
+        user_address = _get_authed_address(request)
+    except HTTPException:
+        pass  # No auth token — allow cancellation in single-user mode
+
+    # Verify ownership (if user authenticated)
+    if user_address:
+        task_user = tasks_cache[task_id].get("userAddress")
+        if task_user and task_user != user_address:
+            raise HTTPException(status_code=403, detail="You do not own this task")
+
     try:
         # Build transaction arguments
         tx_args = json.dumps([
@@ -2829,9 +3054,8 @@ async def cancel_task(task_id: int):
 
         if success:
             # Update cache
-            if task_id in tasks_cache:
-                tasks_cache[task_id]["isActive"] = False
-            logging.info(f"Task cancelled: ID={task_id}")
+            tasks_cache[task_id]["isActive"] = False
+            logging.info(f"Task cancelled: ID={task_id}, user={user_address}")
             return OperationResponse(success=True)
         else:
             logging.error(f"Failed to cancel task: {result}")
@@ -2845,10 +3069,23 @@ async def cancel_task(task_id: int):
 
 
 @app.get("/tasks/{task_id}/results")
-async def get_task_results(task_id: int):
-    """Fetch execution results for a task."""
+async def get_task_results(task_id: int, request: Request):
+    """Fetch execution results for a task (must own the task)."""
     if task_id not in tasks_cache:
         raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+
+    # Try to get user address for ownership verification
+    user_address = None
+    try:
+        user_address = _get_authed_address(request)
+    except HTTPException:
+        pass  # No auth token — allow access in single-user mode
+
+    # Verify ownership (if user authenticated)
+    if user_address:
+        task_user = tasks_cache[task_id].get("userAddress")
+        if task_user and task_user != user_address:
+            raise HTTPException(status_code=403, detail="You do not own this task")
 
     results = task_results.get(task_id, [])
     return results
