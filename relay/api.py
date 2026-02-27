@@ -2454,11 +2454,11 @@ async def get_sessions(request: Request):
 
     sessions = []
     for sid, msgs in session_messages.items():
-        # Filter: if user is authenticated, only return their sessions
+        # Filter: if user is authenticated, only return sessions they own
         if user_address:
             session_user = _session_owners.get(sid)
-            if session_user and session_user != user_address:
-                continue  # Skip sessions belonging to other users
+            if session_user != user_address:
+                continue  # Skip — session belongs to another user or has no owner
 
         non_system = [m for m in msgs if m["role"] != "system"]
         sessions.append({
@@ -2488,7 +2488,7 @@ async def get_session_messages(session_id: str, request: Request):
     # Verify ownership (if user authenticated)
     if user_address:
         session_user = _session_owners.get(session_id)
-        if session_user and session_user != user_address:
+        if session_user != user_address:
             raise HTTPException(status_code=403, detail="You do not own this session")
 
     msgs = session_messages.get(session_id, [])
@@ -3011,11 +3011,11 @@ async def get_agents(request: Request):
 
     result = []
     for aid, info in agents_cache.items():
-        # Filter: if user is authenticated, only return their agents
+        # Filter: if user is authenticated, only return agents they own
         if user_address:
             agent_user = info.get("userAddress") or _agent_user_map.get(aid)
-            if agent_user and agent_user != user_address:
-                continue  # Skip agents belonging to other users
+            if agent_user != user_address:
+                continue  # Skip — agent belongs to another user or has no owner
 
         # Get active agent for this user
         active_agent = _get_active_agent(user_address)
@@ -3155,9 +3155,9 @@ async def select_agent(agent_id: int, request: Request):
         raise HTTPException(status_code=404, detail=f"Agent {agent_id} not found")
 
     # Verify ownership (if user authenticated)
-    if user_address != "__global__":
+    if user_address and user_address != "__global__":
         agent_user = agents_cache[agent_id].get("userAddress") or _agent_user_map.get(agent_id)
-        if agent_user and agent_user != user_address:
+        if agent_user != user_address:
             raise HTTPException(status_code=403, detail="You do not own this agent")
 
     _active_agent_per_user[user_address] = agent_id
@@ -3181,7 +3181,7 @@ async def delete_agent(agent_id: int, request: Request):
     # Verify ownership (if user authenticated)
     if user_address:
         agent_user = agents_cache[agent_id].get("userAddress") or _agent_user_map.get(agent_id)
-        if agent_user and agent_user != user_address:
+        if agent_user != user_address:
             raise HTTPException(status_code=403, detail="You do not own this agent")
 
     del agents_cache[agent_id]
@@ -3209,11 +3209,11 @@ async def get_tasks(request: Request):
 
     result = []
     for tid, entry in tasks_cache.items():
-        # Filter: if user is authenticated, only return their tasks
+        # Filter: if user is authenticated, only return tasks they own
         if user_address:
             task_user = entry.get("userAddress")
-            if task_user and task_user != user_address:
-                continue  # Skip tasks belonging to other users
+            if task_user != user_address:
+                continue  # Skip — task belongs to another user or has no owner
 
         result.append({
             "id": tid,
@@ -3482,7 +3482,7 @@ async def cancel_task(task_id: int, request: Request):
     # Verify ownership (if user authenticated)
     if user_address:
         task_user = tasks_cache[task_id].get("userAddress")
-        if task_user and task_user != user_address:
+        if task_user != user_address:
             raise HTTPException(status_code=403, detail="You do not own this task")
 
     try:
@@ -3527,7 +3527,7 @@ async def get_task_results(task_id: int, request: Request):
     # Verify ownership (if user authenticated)
     if user_address:
         task_user = tasks_cache[task_id].get("userAddress")
-        if task_user and task_user != user_address:
+        if task_user != user_address:
             raise HTTPException(status_code=403, detail="You do not own this task")
 
     results = task_results.get(task_id, [])
