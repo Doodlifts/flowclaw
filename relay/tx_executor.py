@@ -715,28 +715,19 @@ transaction(amount: UFix64, to: Address) {
 }
 """
 
-        if not self.flow_client:
-            raise RuntimeError("Flow REST client not configured — cannot send transactions")
-
         try:
             arguments = [
                 {"type": "UFix64", "value": amount},
                 {"type": "Address", "value": to_address},
             ]
 
-            # Multi-party signing: build unsigned tx with USER as proposer+authorizer
-            build_result = self.flow_client.build_unsigned_transaction(
-                cadence_code=tx_code,
-                arguments=arguments,
-                user_address=user_address,
-                user_key_index=0,
-            )
-
-            # Import _queue_background_tx helper from api module
+            # Queue the recipe — transaction will be built on-demand when
+            # the frontend polls /transaction/pending (avoids sequence collisions)
             from relay.api import _queue_background_tx_direct
             queued = _queue_background_tx_direct(
                 user_address=user_address,
-                build_result=build_result,
+                cadence_code=tx_code,
+                arguments=arguments,
                 description=f"Send {amount} FLOW to {to_address}",
             )
 
@@ -776,22 +767,12 @@ transaction(amount: UFix64, to: Address) {
         if "transaction" not in tx_code.lower():
             raise ValueError("Code must be a valid Cadence transaction (must contain 'transaction' keyword)")
 
-        if not self.flow_client:
-            raise RuntimeError("Flow REST client not configured — cannot send transactions")
-
         try:
-            # Multi-party signing: build unsigned tx with USER as proposer+authorizer
-            build_result = self.flow_client.build_unsigned_transaction(
-                cadence_code=tx_code,
-                arguments=arguments,
-                user_address=user_address,
-                user_key_index=0,
-            )
-
             from relay.api import _queue_background_tx_direct
             queued = _queue_background_tx_direct(
                 user_address=user_address,
-                build_result=build_result,
+                cadence_code=tx_code,
+                arguments=arguments,
                 description="Custom Cadence transaction",
             )
 

@@ -1489,56 +1489,45 @@ def _get_user_tx_lock(address: str) -> asyncio.Lock:
 
 
 def _queue_background_tx(user_address: str, cadence_path: str, tx_args_json: str, description: str = ""):
-    """Queue a background transaction for user signing instead of sponsor-signing.
+    """Queue a background transaction RECIPE for deferred user signing.
 
-    Called by background operations (auto-memory, sub-agent results) that run
-    server-side without the user's browser. Builds an unsigned transaction and
-    stores it in the pending queue for the frontend to poll and sign.
+    Stores the Cadence source path and arguments — the transaction is NOT built
+    until the frontend polls /transaction/pending. This avoids sequence number
+    collisions by ensuring each tx gets a fresh sequence number at build time.
 
-    Falls back to sponsor-signed run_flow_tx() if multi-party build fails.
+    Falls back to sponsor-signed run_flow_tx() if user_address is not available.
     Returns True if queued successfully, False if fell back to sponsor.
     """
     if not flow_rest_client or not user_address or user_address == "__global__":
-        # Can't do multi-party, use sponsor
         run_flow_tx(cadence_path, tx_args_json)
         return False
 
     try:
-        cadence_code = Path(config.project_dir, cadence_path).read_text()
-        build_result = flow_rest_client.build_unsigned_transaction(
-            cadence_code=cadence_code,
-            arguments=json.loads(tx_args_json) if isinstance(tx_args_json, str) else tx_args_json,
-            user_address=user_address,
-            user_key_index=0,
-        )
-        build_id = str(_uuid.uuid4())
-        _pending_tx_builds[build_id] = {
-            "build_result": build_result,
-            "user_address": user_address,
-            "created_at": time.time(),
-        }
+        recipe_id = str(_uuid.uuid4())
+        arguments = json.loads(tx_args_json) if isinstance(tx_args_json, str) else tx_args_json
+
         if user_address not in _pending_bg_transactions:
             _pending_bg_transactions[user_address] = []
         _pending_bg_transactions[user_address].append({
-            "txBuildId": build_id,
+            "recipeId": recipe_id,
+            "cadencePath": cadence_path,
+            "arguments": arguments,
             "description": description,
             "createdAt": time.time(),
         })
-        logging.info(f"Background TX queued for {user_address}: {description} (build_id={build_id[:8]}...)")
+        logging.info(f"Background TX recipe queued for {user_address}: {description} (recipe={recipe_id[:8]}...)")
         return True
     except Exception as e:
-        logging.warning(f"Background multi-party build failed, falling back to sponsor: {e}")
+        logging.warning(f"Background TX queue failed, falling back to sponsor: {e}")
         run_flow_tx(cadence_path, tx_args_json)
         return False
 
 
-def _queue_background_tx_direct(user_address: str, build_result: dict, description: str = ""):
-    """Queue an already-built unsigned transaction for user signing.
+def _queue_background_tx_direct(user_address: str, cadence_code: str = None, arguments: list = None, description: str = "", build_result: dict = None):
+    """Queue a transaction recipe with inline Cadence code (no file path).
 
-    Unlike _queue_background_tx which builds from a Cadence file path, this
-    takes a pre-built transaction result (from build_unsigned_transaction).
     Used by the tool executor for financial operations (send_flow_tokens, etc.)
-    where the transaction is built in the tool code itself.
+    where the Cadence code is generated in the tool itself.
 
     IMPORTANT: This function NEVER falls back to sponsor signing. Financial
     tools MUST be signed by the user — if queuing fails, the operation fails.
@@ -1547,21 +1536,18 @@ def _queue_background_tx_direct(user_address: str, build_result: dict, descripti
         return False
 
     try:
-        build_id = str(_uuid.uuid4())
-        _pending_tx_builds[build_id] = {
-            "build_result": build_result,
-            "user_address": user_address,
-            "created_at": time.time(),
-        }
+        recipe_id = str(_uuid.uuid4())
+
         if user_address not in _pending_bg_transactions:
             _pending_bg_transactions[user_address] = []
         _pending_bg_transactions[user_address].append({
-            "txBuildId": build_id,
-            "payloadHex": build_result.get("payloadHex", ""),
+            "recipeId": recipe_id,
+            "cadenceCode": cadence_code,
+            "arguments": arguments or [],
             "description": description,
             "createdAt": time.time(),
         })
-        logging.info(f"Tool TX queued for {user_address}: {description} (build_id={build_id[:8]}...)")
+        logging.info(f"Tool TX recipe queued for {user_address}: {description} (recipe={recipe_id[:8]}...)")
         return True
     except Exception as e:
         logging.error(f"Failed to queue tool transaction for {user_address}: {e}")
@@ -1683,8 +1669,12 @@ async def submit_transaction(req: SubmitTransactionRequest, request: Request):
             user_signature_b64=req.userSignature,
         )
 
-        # Clean up the pending build
+        # Clean up: remove the build AND the recipe from the pending queue
         del _pending_tx_builds[req.txBuildId]
+        user_pending = _pending_bg_transactions.get(address, [])
+        _pending_bg_transactions[address] = [
+            e for e in user_pending if e.get("recipeId") != req.txBuildId
+        ]
 
         logging.info(
             f"Multi-party TX completed: {result.get('txId', 'unknown')} "
@@ -1703,6 +1693,9 @@ async def submit_transaction(req: SubmitTransactionRequest, request: Request):
         # Reset user's sequence cache so next build re-fetches from chain
         if flow_rest_client:
             flow_rest_client._reset_sequence_number(address, 0)
+        # Remove the failed build so the recipe can be re-built with fresh seq
+        if req.txBuildId in _pending_tx_builds:
+            del _pending_tx_builds[req.txBuildId]
         logging.error(f"Transaction submit failed: {e}")
         raise HTTPException(status_code=500, detail=f"Transaction submit failed: {str(e)}")
 
@@ -1818,40 +1811,80 @@ async def get_cadence_source(path: str):
 async def get_pending_transactions(request: Request):
     """Get pending background transactions that need the user's signature.
 
-    Background operations (auto-memory, sub-agent results) queue unsigned
-    transactions here. The frontend polls this endpoint, signs each payload,
-    and submits via /transaction/submit.
+    Returns at most ONE transaction at a time (the oldest). The transaction is
+    built on-demand with a fresh sequence number to avoid nonce collisions.
+    The frontend signs the payload, submits via /transaction/submit, and polls
+    again for the next one.
     """
     address = _get_authed_address(request)
     pending = _pending_bg_transactions.get(address, [])
 
     # Clean up expired entries (> 5 minutes old)
     cutoff = time.time() - 300
-    active = []
-    for entry in pending:
-        if entry["createdAt"] > cutoff:
-            active.append(entry)
-        else:
-            # Reset sequence cache for expired builds
-            build_id = entry.get("txBuildId")
-            if build_id and build_id in _pending_tx_builds:
-                if flow_rest_client:
-                    flow_rest_client._reset_sequence_number(address, 0)
-                del _pending_tx_builds[build_id]
+    active = [e for e in pending if e["createdAt"] > cutoff]
     _pending_bg_transactions[address] = active
 
-    return {
-        "pending": [
-            {
-                "txBuildId": e["txBuildId"],
-                "payloadHex": _pending_tx_builds.get(e["txBuildId"], {}).get("build_result", {}).get("payloadHex", ""),
-                "description": e.get("description", ""),
-                "createdAt": e["createdAt"],
-            }
-            for e in active
-            if e["txBuildId"] in _pending_tx_builds
-        ]
-    }
+    if not active or not flow_rest_client:
+        return {"pending": []}
+
+    # Build ONLY the first (oldest) recipe into a real transaction
+    recipe = active[0]
+    recipe_id = recipe.get("recipeId", "")
+
+    # Skip if already built (waiting for frontend to submit)
+    if recipe_id in _pending_tx_builds:
+        build = _pending_tx_builds[recipe_id]
+        return {
+            "pending": [{
+                "txBuildId": recipe_id,
+                "payloadHex": build["build_result"].get("payloadHex", ""),
+                "description": recipe.get("description", ""),
+                "createdAt": recipe["createdAt"],
+            }]
+        }
+
+    # Build from recipe — fresh sequence number
+    try:
+        cadence_code = recipe.get("cadenceCode")
+        if not cadence_code and recipe.get("cadencePath"):
+            cadence_code = Path(config.project_dir, recipe["cadencePath"]).read_text()
+
+        if not cadence_code:
+            logging.error(f"Pending recipe {recipe_id[:8]} has no Cadence code, skipping")
+            active.pop(0)
+            return {"pending": []}
+
+        build_result = flow_rest_client.build_unsigned_transaction(
+            cadence_code=cadence_code,
+            arguments=recipe.get("arguments", []),
+            user_address=address,
+            user_key_index=0,
+        )
+
+        _pending_tx_builds[recipe_id] = {
+            "build_result": build_result,
+            "user_address": address,
+            "created_at": time.time(),
+        }
+
+        logging.info(f"Built pending TX from recipe {recipe_id[:8]} for {address} (seq={build_result.get('sequenceNumber')})")
+
+        return {
+            "pending": [{
+                "txBuildId": recipe_id,
+                "payloadHex": build_result.get("payloadHex", ""),
+                "description": recipe.get("description", ""),
+                "createdAt": recipe["createdAt"],
+            }]
+        }
+
+    except Exception as e:
+        logging.error(f"Failed to build pending TX from recipe {recipe_id[:8]}: {e}")
+        # Remove the failed recipe so we don't keep retrying
+        active.pop(0)
+        if flow_rest_client:
+            flow_rest_client._reset_sequence_number(address, 0)
+        return {"pending": []}
 
 
 @app.post("/chat/create-session")
