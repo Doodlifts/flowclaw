@@ -603,7 +603,20 @@ async def startup():
             logging.info(f"Sub-agent {sub_id} ({name}) starting task: {task_description[:100]}")
             agents_cache[sub_id]["status"] = "running"
 
-            provider = providers.get("venice")
+            # Resolve provider: check sub-agent's inherited provider, then parent's, then any available
+            provider = None
+            sub_entry = agents_cache.get(sub_id, {})
+            provider_name = sub_entry.get("provider")
+            if provider_name and provider_name in providers:
+                provider = providers[provider_name]
+            if not provider:
+                parent_id = sub_entry.get("parentAgentId")
+                if parent_id and parent_id in agents_cache:
+                    parent_provider_name = agents_cache[parent_id].get("provider")
+                    if parent_provider_name and parent_provider_name in providers:
+                        provider = providers[parent_provider_name]
+            if not provider and providers:
+                provider = list(providers.values())[0]  # fallback to first available
             if not provider:
                 agents_cache[sub_id]["status"] = "error"
                 agents_cache[sub_id]["lastResult"] = "No LLM provider configured"
@@ -790,6 +803,8 @@ async def startup():
         parent_id = active_agent_id or 1
         expires_at = time.time() + ttl_seconds if ttl_seconds else None
         sub_id = max(agents_cache.keys()) + 1 if agents_cache else 3
+        # Inherit provider/model from parent agent
+        parent_entry = agents_cache.get(parent_id, {})
         agents_cache[sub_id] = {
             "name": name,
             "description": description,
@@ -803,6 +818,8 @@ async def startup():
             "systemPrompt": f"You are {name}, a sub-agent of FlowClaw. Your task: {description}",
             "status": "spawning",
             "lastResult": None,
+            "provider": parent_entry.get("provider"),
+            "model": parent_entry.get("model"),
         }
         logging.info(f"LLM spawned sub-agent: ID={sub_id}, parent={parent_id}, name={name}")
 
@@ -2430,6 +2447,9 @@ async def spawn_sub_agent(agent_id: int, req: SpawnSubAgentRequest):
         if req.ttlSeconds:
             expires_at = time.time() + req.ttlSeconds
 
+        # Inherit provider/model from parent agent
+        parent_entry = agents_cache.get(agent_id, {})
+
         sub_id = max(agents_cache.keys()) + 1 if agents_cache else 3
         agents_cache[sub_id] = {
             "name": req.name,
@@ -2442,9 +2462,18 @@ async def spawn_sub_agent(agent_id: int, req: SpawnSubAgentRequest):
             "totalInferences": 0,
             "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "systemPrompt": f"You are {req.name}, a sub-agent.",
+            "status": "spawning",
+            "lastResult": None,
+            "provider": parent_entry.get("provider"),
+            "model": parent_entry.get("model"),
         }
 
         logging.info(f"Sub-agent spawned: ID={sub_id}, parent={agent_id}, name={req.name}")
+
+        # Kick off the sub-agent's task in the background
+        asyncio.create_task(_run_sub_agent_task(sub_id, req.name, req.description))
+        logging.info(f"Sub-agent {sub_id} background task queued")
+
         return {"agentId": sub_id, "parentId": agent_id, "success": True}
 
     except Exception as e:
