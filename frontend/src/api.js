@@ -22,6 +22,10 @@ async function handleResponse(res) {
   return res.json();
 }
 
+// Maps off-chain relay session IDs → on-chain session IDs.
+// On-chain IDs come from the SessionCreated event after create_session.cdc runs.
+const onChainSessionMap = {};
+
 export const api = {
   // Relay status
   async getStatus() {
@@ -64,6 +68,13 @@ export const api = {
   // Content is ALWAYS encrypted via the relay before being sent to the chain.
   // Block explorers only see ciphertext — never plaintext.
   async _storeMessageOnChain(sessionId, content) {
+    // Resolve the on-chain session ID (off-chain and on-chain IDs differ)
+    const onChainId = onChainSessionMap[sessionId];
+    if (onChainId === undefined) {
+      console.warn('No on-chain session ID mapped for off-chain session', sessionId, '— skipping on-chain storage');
+      return;
+    }
+
     // Step 1: Encrypt content via relay (relay holds the encryption key)
     const enc = await this.encryptContent(content);
 
@@ -71,7 +82,7 @@ export const api = {
     await this.signAndSubmitTransaction(
       'cadence/transactions/send_message.cdc',
       [
-        { type: 'UInt64', value: String(sessionId) },
+        { type: 'UInt64', value: String(onChainId) },
         { type: 'String', value: enc.ciphertext },             // encrypted content
         { type: 'String', value: enc.nonce },                   // encryption nonce
         { type: 'String', value: enc.plaintextHash },           // SHA-256 of plaintext
@@ -101,6 +112,33 @@ export const api = {
         );
         sessionData.txResult = txResult;
         sessionData.onChain = true;
+
+        // Extract on-chain session ID from SessionCreated event.
+        // Flow event format: { type: "A.<addr>.AgentSession.SessionCreated",
+        //   payload: { value: { fields: [{ name: "sessionId", value: { value: "1" } }, ...] } } }
+        if (txResult.events && Array.isArray(txResult.events)) {
+          const sessionEvent = txResult.events.find(e =>
+            e.type && e.type.includes('SessionCreated')
+          );
+          if (sessionEvent) {
+            let onChainId = null;
+            // Try payload.value.fields (JSON-CDC decoded format)
+            const fields = sessionEvent.payload?.value?.fields;
+            if (Array.isArray(fields)) {
+              const sidField = fields.find(f => f.name === 'sessionId');
+              if (sidField) onChainId = parseInt(sidField.value?.value, 10);
+            }
+            // Fallback: direct value (if relay pre-decoded)
+            if (onChainId == null && sessionEvent.payload?.sessionId != null) {
+              onChainId = parseInt(sessionEvent.payload.sessionId, 10);
+            }
+            if (onChainId != null && !isNaN(onChainId)) {
+              onChainSessionMap[sessionData.sessionId] = onChainId;
+              sessionData.onChainSessionId = onChainId;
+              console.log(`Session mapped: off-chain ${sessionData.sessionId} → on-chain ${onChainId}`);
+            }
+          }
+        }
       } catch (err) {
         // Surface the error — don't silently pretend we're on-chain
         console.error('On-chain session creation failed:', err.message);
