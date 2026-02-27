@@ -4,15 +4,8 @@
 // Supports multiple agents per account, sub-agent spawning with TTL,
 // and default agent selection.
 // Private inference config (model, provider, encrypted API key hash) lives in the owner's storage.
-//
-// Agents conform to NonFungibleToken.NFT so they appear as NFTs on FlowScan
-// and are transferable/composable via standard NFT tooling.
 
-import "NonFungibleToken"
-import "MetadataViews"
-import "ViewResolver"
-
-access(all) contract AgentRegistry: NonFungibleToken, ViewResolver {
+access(all) contract AgentRegistry {
 
     // -----------------------------------------------------------------------
     // Events
@@ -167,9 +160,9 @@ access(all) contract AgentRegistry: NonFungibleToken, ViewResolver {
     }
 
     // -----------------------------------------------------------------------
-    // Agent Resource — the core owned entity (NFT)
+    // Agent Resource — the core owned entity
     // -----------------------------------------------------------------------
-    access(all) resource Agent: NonFungibleToken.NFT {
+    access(all) resource Agent {
         access(all) let id: UInt64
         access(all) var name: String
         access(all) var description: String
@@ -206,91 +199,6 @@ access(all) contract AgentRegistry: NonFungibleToken, ViewResolver {
             self.costToday = 0.0
             self.lastHourReset = getCurrentBlock().timestamp
             self.lastDayReset = getCurrentBlock().timestamp
-        }
-
-        // --- NFT Standard: MetadataViews ---
-        access(all) view fun getViews(): [Type] {
-            return [
-                Type<MetadataViews.Display>(),
-                Type<MetadataViews.ExternalURL>(),
-                Type<MetadataViews.NFTCollectionData>(),
-                Type<MetadataViews.NFTCollectionDisplay>(),
-                Type<MetadataViews.Traits>()
-            ]
-        }
-
-        access(all) fun resolveView(_ view: Type): AnyStruct? {
-            switch view {
-                case Type<MetadataViews.Display>():
-                    return MetadataViews.Display(
-                        name: self.name,
-                        description: self.description,
-                        thumbnail: MetadataViews.HTTPFile(
-                            url: "https://flowclaw.app/agent/".concat(self.id.toString()).concat("/thumbnail")
-                        )
-                    )
-                case Type<MetadataViews.ExternalURL>():
-                    return MetadataViews.ExternalURL(
-                        "https://flowclaw.app/agent/".concat(self.id.toString())
-                    )
-                case Type<MetadataViews.NFTCollectionData>():
-                    return AgentRegistry.resolveContractView(
-                        resourceType: Type<@AgentRegistry.Agent>(),
-                        viewType: Type<MetadataViews.NFTCollectionData>()
-                    )
-                case Type<MetadataViews.NFTCollectionDisplay>():
-                    return AgentRegistry.resolveContractView(
-                        resourceType: Type<@AgentRegistry.Agent>(),
-                        viewType: Type<MetadataViews.NFTCollectionDisplay>()
-                    )
-                case Type<MetadataViews.Traits>():
-                    let traits: [MetadataViews.Trait] = [
-                        MetadataViews.Trait(
-                            name: "Provider",
-                            value: self.inferenceConfig.provider,
-                            displayType: "String",
-                            rarity: nil
-                        ),
-                        MetadataViews.Trait(
-                            name: "Model",
-                            value: self.inferenceConfig.model,
-                            displayType: "String",
-                            rarity: nil
-                        ),
-                        MetadataViews.Trait(
-                            name: "Total Sessions",
-                            value: self.totalSessions,
-                            displayType: "Number",
-                            rarity: nil
-                        ),
-                        MetadataViews.Trait(
-                            name: "Total Inferences",
-                            value: self.totalInferences,
-                            displayType: "Number",
-                            rarity: nil
-                        ),
-                        MetadataViews.Trait(
-                            name: "Active",
-                            value: self.isActive,
-                            displayType: "Boolean",
-                            rarity: nil
-                        ),
-                        MetadataViews.Trait(
-                            name: "Autonomy Level",
-                            value: self.securityPolicy.autonomyLevel,
-                            displayType: "Number",
-                            rarity: nil
-                        )
-                    ]
-                    return MetadataViews.Traits(traits)
-            }
-            return nil
-        }
-
-        /// Required by NonFungibleToken.NFT — creates an empty collection
-        /// of the same type so the NFT can be deposited.
-        access(all) fun createEmptyCollection(): @{NonFungibleToken.Collection} {
-            return <- AgentRegistry.createEmptyCollection(nftType: Type<@AgentRegistry.Agent>())
         }
 
         // --- Public read-only view ---
@@ -390,88 +298,30 @@ access(all) contract AgentRegistry: NonFungibleToken, ViewResolver {
     }
 
     // -----------------------------------------------------------------------
-    // AgentCollection — holds multiple agents per account (NFT Collection)
+    // AgentCollection — holds multiple agents per account
     // -----------------------------------------------------------------------
-    access(all) resource AgentCollection: NonFungibleToken.Collection {
-        /// Standard NFT storage — required by NonFungibleToken.Collection
-        access(all) var ownedNFTs: @{UInt64: {NonFungibleToken.NFT}}
-
+    access(all) resource AgentCollection {
+        access(self) let agents: @{UInt64: Agent}
         access(self) var defaultAgentId: UInt64?
         access(self) let subAgentInfo: {UInt64: SubAgentInfo}
 
         init() {
-            self.ownedNFTs <- {}
+            self.agents <- {}
             self.defaultAgentId = nil
             self.subAgentInfo = {}
         }
 
-        // --- NonFungibleToken.Collection standard methods ---
+        // --- Manage entitlement: add/remove agents ---
 
-        /// Deposit an NFT into this collection (standard NFT interface)
-        access(all) fun deposit(token: @{NonFungibleToken.NFT}) {
-            let agent <- token as! @AgentRegistry.Agent
+        access(Manage) fun addAgent(_ agent: @Agent) {
             let id = agent.id
-
-            let old <- self.ownedNFTs[id] <- agent
+            let old <- self.agents[id] <- agent
             destroy old
 
             // If this is the first agent, make it the default
             if self.defaultAgentId == nil {
                 self.defaultAgentId = id
             }
-        }
-
-        /// Withdraw an NFT from this collection (standard NFT interface)
-        access(NonFungibleToken.Withdraw) fun withdraw(withdrawID: UInt64): @{NonFungibleToken.NFT} {
-            let agent <- self.ownedNFTs.remove(key: withdrawID)
-                ?? panic("Agent not found in collection")
-
-            // If we removed the default, pick another
-            if self.defaultAgentId == withdrawID {
-                let remaining = self.ownedNFTs.keys
-                self.defaultAgentId = remaining.length > 0 ? remaining[0] : nil
-            }
-
-            // Clean up sub-agent info
-            self.subAgentInfo.remove(key: withdrawID)
-
-            return <- agent
-        }
-
-        /// Get all NFT IDs in this collection
-        access(all) view fun getIDs(): [UInt64] {
-            return self.ownedNFTs.keys
-        }
-
-        /// Get the number of NFTs
-        access(all) view fun getLength(): Int {
-            return self.ownedNFTs.keys.length
-        }
-
-        /// Borrow a reference to an NFT (standard interface)
-        access(all) view fun borrowNFT(_ id: UInt64): &{NonFungibleToken.NFT}? {
-            return &self.ownedNFTs[id]
-        }
-
-        /// Which NFT types this collection supports
-        access(all) view fun getSupportedNFTTypes(): {Type: Bool} {
-            return { Type<@AgentRegistry.Agent>(): true }
-        }
-
-        /// Check if a specific NFT type is supported
-        access(all) view fun isSupportedNFTType(type: Type): Bool {
-            return type == Type<@AgentRegistry.Agent>()
-        }
-
-        /// Create an empty collection of the same type
-        access(all) fun createEmptyCollection(): @{NonFungibleToken.Collection} {
-            return <- create AgentCollection()
-        }
-
-        // --- Manage entitlement: FlowClaw-specific operations ---
-
-        access(Manage) fun addAgent(_ agent: @Agent) {
-            self.deposit(token: <- agent)
         }
 
         access(Manage) fun createAgent(
@@ -494,14 +344,24 @@ access(all) contract AgentRegistry: NonFungibleToken, ViewResolver {
         }
 
         access(Manage) fun removeAgent(id: UInt64): @Agent {
-            let nft <- self.withdraw(withdrawID: id)
-            let agent <- nft as! @Agent
+            let agent <- self.agents.remove(key: id)
+                ?? panic("Agent not found in collection")
+
+            // If we removed the default, pick another
+            if self.defaultAgentId == id {
+                let remaining = self.agents.keys
+                self.defaultAgentId = remaining.length > 0 ? remaining[0] : nil
+            }
+
+            // Clean up sub-agent info
+            self.subAgentInfo.remove(key: id)
+
             return <- agent
         }
 
         access(Manage) fun setDefault(agentId: UInt64) {
             pre {
-                self.ownedNFTs[agentId] != nil: "Agent not in collection"
+                self.agents[agentId] != nil: "Agent not in collection"
             }
             self.defaultAgentId = agentId
             emit DefaultAgentChanged(owner: self.owner!.address, agentId: agentId)
@@ -518,7 +378,7 @@ access(all) contract AgentRegistry: NonFungibleToken, ViewResolver {
             inheritConfig: Bool
         ): UInt64 {
             pre {
-                self.ownedNFTs[parentAgentId] != nil: "Parent agent not found"
+                self.agents[parentAgentId] != nil: "Parent agent not found"
             }
 
             // Build config: inherit from parent or use defaults
@@ -526,7 +386,7 @@ access(all) contract AgentRegistry: NonFungibleToken, ViewResolver {
             var securityPolicy: SecurityPolicy? = nil
 
             if inheritConfig {
-                let parentRef = self.borrowAgentManaged(id: parentAgentId)!
+                let parentRef = (&self.agents[parentAgentId] as auth(Execute) &Agent?)!
                 inferenceConfig = parentRef.getInferenceConfig()
                 securityPolicy = parentRef.getSecurityPolicy()
             }
@@ -608,25 +468,19 @@ access(all) contract AgentRegistry: NonFungibleToken, ViewResolver {
         // --- Read access ---
 
         access(all) fun borrowAgent(id: UInt64): &Agent? {
-            if let nft = &self.ownedNFTs[id] as &{NonFungibleToken.NFT}? {
-                return nft as! &Agent
-            }
-            return nil
+            return &self.agents[id]
         }
 
         access(Manage) fun borrowAgentManaged(id: UInt64): auth(Configure, Execute, Admin) &Agent? {
-            if let nft = &self.ownedNFTs[id] as auth(Configure, Execute, Admin) &{NonFungibleToken.NFT}? {
-                return nft as! auth(Configure, Execute, Admin) &Agent
-            }
-            return nil
+            return &self.agents[id]
         }
 
         access(all) fun getAgentIds(): [UInt64] {
-            return self.ownedNFTs.keys
+            return self.agents.keys
         }
 
         access(all) fun getAgentCount(): Int {
-            return self.ownedNFTs.keys.length
+            return self.agents.keys.length
         }
 
         access(all) fun getDefaultAgentId(): UInt64? {
@@ -655,60 +509,13 @@ access(all) contract AgentRegistry: NonFungibleToken, ViewResolver {
 
         access(all) fun getAllAgentInfo(): [AgentPublicInfo] {
             let infos: [AgentPublicInfo] = []
-            for id in self.ownedNFTs.keys {
-                if let agent = self.borrowAgent(id: id) {
+            for id in self.agents.keys {
+                if let agent = &self.agents[id] as &Agent? {
                     infos.append(agent.getPublicInfo())
                 }
             }
             return infos
         }
-    }
-
-    // -----------------------------------------------------------------------
-    // Contract-level NFT views (ViewResolver conformance)
-    // -----------------------------------------------------------------------
-
-    /// Returns the views this contract supports at the contract level
-    access(all) view fun getContractViews(resourceType: Type?): [Type] {
-        return [
-            Type<MetadataViews.NFTCollectionData>(),
-            Type<MetadataViews.NFTCollectionDisplay>()
-        ]
-    }
-
-    /// Resolve a contract-level view
-    access(all) fun resolveContractView(resourceType: Type?, viewType: Type): AnyStruct? {
-        switch viewType {
-            case Type<MetadataViews.NFTCollectionData>():
-                return MetadataViews.NFTCollectionData(
-                    storagePath: self.AgentCollectionStoragePath,
-                    publicPath: self.AgentCollectionPublicPath,
-                    publicCollection: Type<&AgentRegistry.AgentCollection>(),
-                    publicLinkedType: Type<&AgentRegistry.AgentCollection>(),
-                    createEmptyCollectionFunction: fun(): @{NonFungibleToken.Collection} {
-                        return <- AgentRegistry.createEmptyCollection(nftType: Type<@AgentRegistry.Agent>())
-                    }
-                )
-            case Type<MetadataViews.NFTCollectionDisplay>():
-                return MetadataViews.NFTCollectionDisplay(
-                    name: "FlowClaw AI Agents",
-                    description: "Autonomous AI agents living on the Flow blockchain. Each agent is a Cadence Resource with its own identity, memory, and inference configuration — owned entirely by you.",
-                    externalURL: MetadataViews.ExternalURL("https://flowclaw.app"),
-                    squareImage: MetadataViews.Media(
-                        file: MetadataViews.HTTPFile(url: "https://flowclaw.app/logo-square.png"),
-                        mediaType: "image/png"
-                    ),
-                    bannerImage: MetadataViews.Media(
-                        file: MetadataViews.HTTPFile(url: "https://flowclaw.app/banner.png"),
-                        mediaType: "image/png"
-                    ),
-                    socials: {
-                        "twitter": MetadataViews.ExternalURL("https://x.com/flowclaw"),
-                        "github": MetadataViews.ExternalURL("https://github.com/Doodlifts/flowclaw")
-                    }
-                )
-        }
-        return nil
     }
 
     // -----------------------------------------------------------------------
@@ -731,13 +538,6 @@ access(all) contract AgentRegistry: NonFungibleToken, ViewResolver {
         )
         emit AgentCreated(id: agent.id, owner: ownerAddress, name: name)
         return <- agent
-    }
-
-    // -----------------------------------------------------------------------
-    // Create empty collection (NonFungibleToken standard)
-    // -----------------------------------------------------------------------
-    access(all) fun createEmptyCollection(nftType: Type): @{NonFungibleToken.Collection} {
-        return <- create AgentCollection()
     }
 
     // -----------------------------------------------------------------------
