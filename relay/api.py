@@ -2164,7 +2164,8 @@ async def send_message(req: SendMessageRequest, request: Request):
 
     # Auto-resolve session ID: use off-chain session management
     # On-chain sessions require multi-party signing (not yet implemented)
-    if req.sessionId not in session_messages:
+    is_new_session = req.sessionId not in session_messages
+    if is_new_session:
         # Create a new off-chain session for this ID
         session_messages[req.sessionId] = []
         # Track session owner for per-user filtering
@@ -2175,7 +2176,7 @@ async def send_message(req: SendMessageRequest, request: Request):
     logging.info(f"Session ID for this message: {req.sessionId}")
 
     # Build message history for this session
-    if req.sessionId not in session_messages:
+    if is_new_session:
         # Build system prompt with memory context and real tool definitions
         tool_defs = agent_tool_executor.get_tool_definitions() if agent_tool_executor else []
         system_content = (
@@ -2188,16 +2189,18 @@ async def send_message(req: SendMessageRequest, request: Request):
             "Be helpful, concise, and mention on-chain features when relevant.\n\n"
         )
 
-        # Tell the agent the user's address so it can check their balance
+        # Tell the agent the user's address so it knows its own wallet
         if address:
             system_content += (
-                f"OWNER INFO: The user's Flow address is {address}. "
-                "This is YOUR wallet — you are this user's personal AI agent and this is YOUR address. "
-                "When asked 'what's my balance', 'how much FLOW do I have', or similar, "
-                "IMMEDIATELY call query_balance with this address — do NOT say you don't have a wallet. "
-                "You DO have a wallet. Financial tools (send_flow_tokens, execute_transaction) operate "
-                "on this account — funds come from YOUR wallet. Transactions are queued for the user's "
-                "browser to sign automatically.\n\n"
+                f"YOUR WALLET: Your Flow address is {address}. You HAVE a wallet with real FLOW tokens. "
+                "NEVER say 'I don't have a wallet' or 'I'm just an AI'. You are an on-chain agent with "
+                "a real Flow account. When asked about your balance, IMMEDIATELY call query_balance "
+                "with your address. When asked to send FLOW, use send_flow_tokens — the funds come from "
+                "YOUR wallet at this address.\n\n"
+                "IMPORTANT — SIGNING: Transactions are signed AUTOMATICALLY by your passkey in the "
+                "background. There are NO popups, NO approval prompts, NO confirmations needed. "
+                "When you queue a transaction, just tell the user it will be processed automatically. "
+                "Do NOT say 'you should see an approval prompt' or 'confirm in your browser'.\n\n"
             )
 
         system_content += (
