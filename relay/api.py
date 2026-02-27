@@ -1463,6 +1463,17 @@ async def encrypt_content(req: EncryptContentRequest, request: Request):
 import uuid as _uuid
 _pending_tx_builds: Dict[str, Dict] = {}
 
+# Per-user async locks to serialize multi-party transaction build+submit.
+# This prevents a second build from starting before the first submit completes,
+# which would cause sequence number conflicts.
+_user_tx_locks: Dict[str, asyncio.Lock] = {}
+
+def _get_user_tx_lock(address: str) -> asyncio.Lock:
+    """Get or create an async lock for a user's transactions."""
+    if address not in _user_tx_locks:
+        _user_tx_locks[address] = asyncio.Lock()
+    return _user_tx_locks[address]
+
 
 class BuildTransactionRequest(BaseModel):
     transactionPath: str  # Path to .cdc file relative to project dir
@@ -1481,56 +1492,69 @@ async def build_transaction(req: BuildTransactionRequest, request: Request):
     The authenticated user becomes proposer + authorizer.
     The sponsor (relay) becomes the payer.
     Returns a payloadHex that the user must sign client-side.
+
+    Acquires a per-user async lock to prevent concurrent builds that would
+    cause sequence number conflicts (e.g., create_session + send_message).
     """
     address = _get_authed_address(request)
 
     if not flow_rest_client:
         raise HTTPException(status_code=503, detail="Flow REST client not initialized")
 
-    try:
-        # Read the Cadence transaction file
-        tx_file = Path(config.project_dir) / req.transactionPath
-        if not tx_file.exists():
-            raise HTTPException(status_code=404, detail=f"Transaction file not found: {req.transactionPath}")
+    # Acquire per-user lock — prevents two builds from getting the same seq number
+    user_lock = _get_user_tx_lock(address)
+    async with user_lock:
+        try:
+            # Read the Cadence transaction file
+            tx_file = Path(config.project_dir) / req.transactionPath
+            if not tx_file.exists():
+                raise HTTPException(status_code=404, detail=f"Transaction file not found: {req.transactionPath}")
 
-        cadence_code = tx_file.read_text()
+            cadence_code = tx_file.read_text()
 
-        # Build the unsigned transaction
-        build_result = flow_rest_client.build_unsigned_transaction(
-            cadence_code=cadence_code,
-            arguments=req.arguments if req.arguments else None,
-            user_address=address,
-            user_key_index=0,  # User accounts created with key index 0
-        )
+            # Build the unsigned transaction (flow_client handles seq number tracking)
+            build_result = flow_rest_client.build_unsigned_transaction(
+                cadence_code=cadence_code,
+                arguments=req.arguments if req.arguments else None,
+                user_address=address,
+                user_key_index=0,  # User accounts created with key index 0
+            )
 
-        # Store in cache with a unique build ID (expires after 5 minutes)
-        build_id = str(_uuid.uuid4())
-        _pending_tx_builds[build_id] = {
-            "build_result": build_result,
-            "user_address": address,
-            "created_at": time.time(),
-        }
+            # Store in cache with a unique build ID (expires after 5 minutes)
+            build_id = str(_uuid.uuid4())
+            _pending_tx_builds[build_id] = {
+                "build_result": build_result,
+                "user_address": address,
+                "created_at": time.time(),
+            }
 
-        # Clean up old builds (older than 5 minutes)
-        cutoff = time.time() - 300
-        expired = [k for k, v in _pending_tx_builds.items() if v["created_at"] < cutoff]
-        for k in expired:
-            del _pending_tx_builds[k]
+            # Clean up old builds (older than 5 minutes).
+            # When a build expires without being submitted, reset the user's
+            # sequence cache so the next build re-fetches from chain.
+            cutoff = time.time() - 300
+            expired = [k for k, v in _pending_tx_builds.items() if v["created_at"] < cutoff]
+            for k in expired:
+                expired_entry = _pending_tx_builds[k]
+                expired_addr = expired_entry.get("user_address")
+                if expired_addr and flow_rest_client:
+                    flow_rest_client._reset_sequence_number(expired_addr, 0)
+                    logging.info(f"Reset sequence cache for {expired_addr} (expired build {k[:8]}...)")
+                del _pending_tx_builds[k]
 
-        logging.info(f"Transaction built for {address}: {req.transactionPath} (build_id={build_id[:8]}...)")
+            logging.info(f"Transaction built for {address}: {req.transactionPath} (build_id={build_id[:8]}...)")
 
-        return {
-            "txBuildId": build_id,
-            "payloadHex": build_result["payloadHex"],
-            "referenceBlockId": build_result["referenceBlockId"],
-            "sequenceNumber": build_result["sequenceNumber"],
-        }
+            return {
+                "txBuildId": build_id,
+                "payloadHex": build_result["payloadHex"],
+                "referenceBlockId": build_result["referenceBlockId"],
+                "sequenceNumber": build_result["sequenceNumber"],
+            }
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        logging.error(f"Transaction build failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Transaction build failed: {str(e)}")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logging.error(f"Transaction build failed: {e}")
+            raise HTTPException(status_code=500, detail=f"Transaction build failed: {str(e)}")
 
 
 @app.post("/transaction/submit")
@@ -1583,6 +1607,9 @@ async def submit_transaction(req: SubmitTransactionRequest, request: Request):
         }
 
     except Exception as e:
+        # Reset user's sequence cache so next build re-fetches from chain
+        if flow_rest_client:
+            flow_rest_client._reset_sequence_number(address, 0)
         logging.error(f"Transaction submit failed: {e}")
         raise HTTPException(status_code=500, detail=f"Transaction submit failed: {str(e)}")
 

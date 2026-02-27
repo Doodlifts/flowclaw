@@ -20,6 +20,7 @@ import hashlib
 import json
 import logging
 import struct
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -301,6 +302,14 @@ class FlowRESTClient:
         self.hash_algo = hash_algo
         self.contract_aliases: Dict[str, str] = {}  # contract name -> address
 
+        # Per-account sequence number tracking to prevent nonce conflicts
+        # when multiple transactions are submitted rapidly for the same account.
+        # Key: "address:key_index", Value: next expected sequence number
+        self._seq_cache: Dict[str, int] = {}
+        # Per-account locks to serialize transaction building for the same proposer
+        self._seq_locks: Dict[str, threading.Lock] = {}
+        self._seq_locks_lock = threading.Lock()  # protects _seq_locks dict itself
+
         self._session = requests.Session()
         self._session.headers.update({
             "Content-Type": "application/json",
@@ -494,6 +503,7 @@ class FlowRESTClient:
         Build, sign, and submit a transaction.
 
         For single-signer (default): proposer = authorizer = payer = self.signer_address
+        Serializes transactions per-proposer to prevent sequence number conflicts.
 
         Args:
             cadence_code: Cadence transaction source code
@@ -521,6 +531,31 @@ class FlowRESTClient:
         authorizers = authorizers or [self.signer_address]
         proposer_key_idx = proposer_key_index if proposer_key_index is not None else self.signer_key_index
         gas = gas_limit or self.default_gas_limit
+
+        # Acquire per-account lock to serialize transactions for the same proposer
+        account_lock = self._get_account_lock(proposer, proposer_key_idx)
+        account_lock.acquire()
+        try:
+            return self._send_transaction_locked(
+                cadence_code, arguments, authorizers, payer, proposer,
+                proposer_key_idx, gas, wait_sealed, timeout,
+            )
+        finally:
+            account_lock.release()
+
+    def _send_transaction_locked(
+        self,
+        cadence_code: str,
+        arguments: Optional[List[Dict]],
+        authorizers: List[str],
+        payer: str,
+        proposer: str,
+        proposer_key_idx: int,
+        gas: int,
+        wait_sealed: bool,
+        timeout: int,
+    ) -> Dict[str, Any]:
+        """Internal: build, sign, submit a transaction (caller holds the account lock)."""
 
         # 1. Get reference block and sequence number
         ref_block_id = self._get_latest_block_id()
@@ -667,9 +702,18 @@ class FlowRESTClient:
 
             logger.info(f"Transaction submitted: {tx_id}")
 
+            # Optimistically advance sequence number so the next transaction
+            # for this account uses seq+1 even before the chain confirms it.
+            self._advance_sequence_number(proposer, proposer_key_idx)
+
             # 8. Wait for seal if requested
             if wait_sealed and tx_id:
-                return self._wait_for_seal(tx_id, timeout)
+                result = self._wait_for_seal(tx_id, timeout)
+                # If the transaction failed on-chain, reset the cached sequence
+                # so the next attempt re-fetches from chain
+                if result.get("error") and result.get("status") not in ("SEALED",):
+                    self._reset_sequence_number(proposer, proposer_key_idx)
+                return result
 
             return {
                 "txId": tx_id,
@@ -678,6 +722,7 @@ class FlowRESTClient:
             }
 
         except requests.exceptions.RequestException as e:
+            # Submission failed — don't advance sequence number
             logger.error(f"Transaction submission error: {e}")
             raise RuntimeError(f"Transaction submission error: {e}")
 
@@ -698,6 +743,9 @@ class FlowRESTClient:
 
         The user is proposer + authorizer, the sponsor (self.signer_address) is payer.
         Returns the payload hex that the user must sign, plus metadata needed for completion.
+
+        Acquires a per-account lock to prevent sequence number conflicts when
+        multiple transactions are built rapidly for the same user.
 
         Args:
             cadence_code: Cadence transaction source code
@@ -723,6 +771,26 @@ class FlowRESTClient:
             raise ValueError("user_address is required for multi-party transactions")
         if not self.signer_address:
             raise RuntimeError("Sponsor (payer) not configured — set signer_address")
+
+        # Acquire per-account lock to serialize builds for the same user
+        account_lock = self._get_account_lock(user_address, user_key_index)
+        account_lock.acquire()
+        try:
+            return self._build_unsigned_transaction_locked(
+                cadence_code, arguments, user_address, user_key_index, gas_limit
+            )
+        finally:
+            account_lock.release()
+
+    def _build_unsigned_transaction_locked(
+        self,
+        cadence_code: str,
+        arguments: Optional[List[Dict]],
+        user_address: str,
+        user_key_index: int,
+        gas_limit: Optional[int],
+    ) -> Dict[str, Any]:
+        """Internal: build unsigned transaction (caller holds the account lock)."""
 
         # Resolve imports
         cadence_code = self._resolve_imports(cadence_code)
@@ -770,6 +838,10 @@ class FlowRESTClient:
         if arguments:
             for arg in arguments:
                 args_b64.append(_encode_cadence_argument(arg))
+
+        # Optimistically advance sequence number so the next build for this
+        # account uses seq+1 even before this transaction is submitted/sealed.
+        self._advance_sequence_number(user_address, user_key_index)
 
         return {
             "payloadHex": payload_message.hex(),
@@ -898,7 +970,11 @@ class FlowRESTClient:
             logger.info(f"Multi-party TX submitted: {tx_id} (user={user_address}, payer={payer})")
 
             if wait_sealed and tx_id:
-                return self._wait_for_seal(tx_id, timeout)
+                result = self._wait_for_seal(tx_id, timeout)
+                # If the transaction failed on-chain, reset the user's cached sequence
+                if result.get("error") and result.get("status") not in ("SEALED",):
+                    self._reset_sequence_number(user_address, user_key_index)
+                return result
 
             return {
                 "txId": tx_id,
@@ -907,6 +983,8 @@ class FlowRESTClient:
             }
 
         except requests.exceptions.RequestException as e:
+            # Submission failed — reset sequence cache for this user
+            self._reset_sequence_number(user_address, user_key_index)
             logger.error(f"Multi-party TX submission error: {e}")
             raise RuntimeError(f"Transaction submission error: {e}")
 
@@ -1100,15 +1178,59 @@ class FlowRESTClient:
         except requests.exceptions.RequestException as e:
             raise RuntimeError(f"Block query error: {e}")
 
+    def _get_account_lock(self, address: str, key_index: int = 0) -> threading.Lock:
+        """Get or create a per-account lock for serializing transactions."""
+        cache_key = f"{_normalize_address(address)}:{key_index}"
+        with self._seq_locks_lock:
+            if cache_key not in self._seq_locks:
+                self._seq_locks[cache_key] = threading.Lock()
+            return self._seq_locks[cache_key]
+
     def _get_sequence_number(self, address: str, key_index: int = 0) -> int:
-        """Get the sequence number for a key on an account."""
+        """Get the sequence number for a key on an account.
+
+        Uses optimistic tracking: returns max(chain_value, cached_value) to handle
+        cases where the chain hasn't indexed a recently submitted transaction yet.
+        """
+        cache_key = f"{_normalize_address(address)}:{key_index}"
+
+        # Fetch from chain
+        chain_seq = self._fetch_chain_sequence_number(address, key_index)
+
+        # Use the higher of chain value or our cached expected value
+        cached_seq = self._seq_cache.get(cache_key, 0)
+
+        if cached_seq > chain_seq:
+            logger.info(
+                f"Sequence number for {address} key {key_index}: "
+                f"using cached {cached_seq} (chain reports {chain_seq})"
+            )
+            return cached_seq
+        else:
+            # Chain caught up or is ahead — update cache
+            self._seq_cache[cache_key] = chain_seq
+            return chain_seq
+
+    def _advance_sequence_number(self, address: str, key_index: int = 0):
+        """Increment the cached sequence number after a successful transaction submission."""
+        cache_key = f"{_normalize_address(address)}:{key_index}"
+        current = self._seq_cache.get(cache_key, 0)
+        self._seq_cache[cache_key] = current + 1
+        logger.info(f"Advanced sequence number for {address} key {key_index}: {current} → {current + 1}")
+
+    def _reset_sequence_number(self, address: str, key_index: int = 0):
+        """Reset cached sequence number (e.g., after a failed submission)."""
+        cache_key = f"{_normalize_address(address)}:{key_index}"
+        if cache_key in self._seq_cache:
+            del self._seq_cache[cache_key]
+            logger.info(f"Reset sequence number cache for {address} key {key_index}")
+
+    def _fetch_chain_sequence_number(self, address: str, key_index: int = 0) -> int:
+        """Fetch the sequence number directly from the chain (no caching)."""
         account = self.get_account(address)
         keys = account.get("keys", [])
 
-        # Debug: log raw key data to diagnose format issues
-        if keys:
-            logger.info(f"Account {address} has {len(keys)} key(s), first key sample: {str(keys[0])[:200]}")
-        else:
+        if not keys:
             logger.warning(f"Account {address} returned no keys")
             return 0
 
@@ -1117,13 +1239,11 @@ class FlowRESTClient:
                 idx = key.get("index", key.get("key_index", -1))
                 if int(idx) == key_index:
                     seq = key.get("sequence_number", key.get("sequenceNumber", 0))
-                    logger.info(f"Sequence number for {address} key {key_index}: {seq}")
                     return int(seq)
             elif isinstance(key, str):
-                # Keys might be base64-encoded; try to decode
                 logger.info(f"Key is a string (possibly base64): {key[:80]}...")
 
-        logger.warning(f"Key {key_index} not found for {address} (keys format: {type(keys[0]) if keys else 'empty'}), returning 0")
+        logger.warning(f"Key {key_index} not found for {address}, returning 0")
         return 0
 
     def _wait_for_seal(self, tx_id: str, timeout: int = 120) -> Dict:
