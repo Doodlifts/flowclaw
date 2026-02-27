@@ -36,7 +36,44 @@ export const api = {
       headers: getAuthHeaders(),
       body: JSON.stringify({ sessionId, content, provider, model }),
     });
-    return handleResponse(res);
+    const result = await handleResponse(res);
+
+    // Store message on-chain via multi-party signing (best-effort, non-blocking)
+    const address = localStorage.getItem('flowclaw_address');
+    if (address && hasSigningKey(address)) {
+      // Fire and forget — don't block the chat UX
+      this._storeMessageOnChain(sessionId, content).catch(err => {
+        console.error('On-chain message storage failed:', err.message);
+      });
+    }
+
+    return result;
+  },
+
+  // Internal: store a message on-chain (non-blocking)
+  async _storeMessageOnChain(sessionId, content) {
+    const contentHash = await this._sha256(content);
+    await this.signAndSubmitTransaction(
+      'cadence/transactions/send_message.cdc',
+      [
+        { type: 'UInt64', value: String(sessionId) },
+        { type: 'String', value: content.substring(0, 500) },  // ciphertext placeholder
+        { type: 'String', value: '' },                          // nonce
+        { type: 'String', value: contentHash },                 // plaintextHash
+        { type: 'String', value: '' },                          // keyFingerprint
+        { type: 'UInt8', value: '0' },                          // algorithm
+        { type: 'UInt64', value: String(content.length) },      // plaintextLength
+      ]
+    );
+  },
+
+  // SHA-256 hash helper
+  async _sha256(text) {
+    const encoder = new TextEncoder();
+    const data = encoder.encode(text);
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
   },
 
   async createSession(maxContextMessages = 4096) {
