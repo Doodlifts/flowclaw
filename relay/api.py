@@ -110,19 +110,8 @@ account_manager: Optional[AccountManager] = None
 gas_sponsor: Optional[GasSponsor] = None
 start_time: float = 0
 # Multi-agent state
-agents_cache: Dict[int, Dict] = {
-    1: {
-        "name": "FlowClaw Agent",
-        "description": "Primary AI agent on the Flow blockchain",
-        "isActive": True,
-        "isSubAgent": False,
-        "totalSessions": 0,
-        "totalInferences": 0,
-        "createdAt": "",
-        "systemPrompt": "Your name is FlowClaw. You are an autonomous AI agent on the Flow blockchain.",
-    }
-}
-active_agent_id: Optional[int] = 1  # Currently selected agent
+agents_cache: Dict[int, Dict] = {}  # Empty — user creates agents after adding LLM provider
+active_agent_id: Optional[int] = None  # No agent selected until user creates one
 session_messages: Dict[int, List[Dict]] = {}  # Local cache for PoC
 memory_cache: Dict[int, Dict] = {}  # Local cache for memory operations
 tasks_cache: Dict[int, Dict] = {}  # Local cache for task operations
