@@ -3361,21 +3361,21 @@ async def store_memory(req: StoreMemoryRequest, request: Request):
                 logging.warning(f"Multi-party build failed, falling back to sponsor: {build_err}")
                 # Fall through to sponsor-signed path
 
-        # Fallback: sponsor signs (for unauthenticated or build failure)
-        result = run_flow_tx("cadence/transactions/store_memory.cdc", tx_args)
-        success = result is not None and ("sealed" in result.lower() or "success" in result.lower())
+        # Fallback: queue for multi-party signing (for build failure or simpler path)
+        _queue_background_tx(
+            user_address,
+            "cadence/transactions/store_memory.cdc",
+            tx_args,
+            description=f"Store memory: {req.key}",
+        )
 
-        if success:
-            cog_entry.on_chain = True
-            logging.info(
-                f"Memory stored (sponsor-signed): ID={memory_id}, key={req.key}, "
-                f"type={MemoryType(memory_type).name}, importance={importance}, "
-                f"bonds={cog_entry.bond_count}"
-            )
-            return MemoryStoreResponse(memoryId=memory_id, success=True)
-        else:
-            logging.error(f"Failed to store memory: {result}")
-            raise HTTPException(status_code=500, detail=f"Failed to store memory on-chain")
+        cog_entry.on_chain = True
+        logging.info(
+            f"Memory queued for signing: ID={memory_id}, key={req.key}, "
+            f"type={MemoryType(memory_type).name}, importance={importance}, "
+            f"bonds={cog_entry.bond_count}"
+        )
+        return MemoryStoreResponse(memoryId=memory_id, success=True)
 
     except HTTPException:
         raise
@@ -3422,17 +3422,23 @@ async def schedule_task(req: ScheduleTaskRequest, request: Request):
 
         tx_args = json.dumps(tx_arg_list)
 
-        # Send transaction
-        result = run_flow_tx("cadence/transactions/schedule_task.cdc", tx_args)
-        success = result is not None and ("sealed" in result.lower() or "success" in result.lower())
+        # Capture user address for BYOK provider resolution and multi-party signing
+        task_user_addr = None
+        try:
+            task_user_addr = _get_authed_address(request)
+        except Exception:
+            pass
+
+        # Queue for multi-party signing
+        _queue_background_tx(
+            task_user_addr or "__global__",
+            "cadence/transactions/schedule_task.cdc",
+            tx_args,
+            description=f"Schedule task: {req.name}",
+        )
+        success = True
 
         if success:
-            # Capture user address for BYOK provider resolution during execution
-            task_user_addr = None
-            try:
-                task_user_addr = _get_authed_address(request)
-            except Exception:
-                pass
 
             # Cache the operation
             task_id = _next_task_id
@@ -3491,18 +3497,18 @@ async def cancel_task(task_id: int, request: Request):
             {"type": "UInt64", "value": str(task_id)},
         ])
 
-        # Send transaction
-        result = run_flow_tx("cadence/transactions/cancel_task.cdc", tx_args)
-        success = result is not None and ("sealed" in result.lower() or "success" in result.lower())
+        # Queue for multi-party signing
+        _queue_background_tx(
+            user_address or "__global__",
+            "cadence/transactions/cancel_task.cdc",
+            tx_args,
+            description=f"Cancel task #{task_id}",
+        )
 
-        if success:
-            # Update cache
-            tasks_cache[task_id]["isActive"] = False
-            logging.info(f"Task cancelled: ID={task_id}, user={user_address}")
-            return OperationResponse(success=True)
-        else:
-            logging.error(f"Failed to cancel task: {result}")
-            raise HTTPException(status_code=500, detail=f"Failed to cancel task on-chain")
+        # Update cache immediately
+        tasks_cache[task_id]["isActive"] = False
+        logging.info(f"Task cancelled: ID={task_id}, user={user_address}")
+        return OperationResponse(success=True)
 
     except HTTPException:
         raise
@@ -3557,13 +3563,19 @@ async def get_extensions():
 
 
 @app.post("/extensions/publish")
-async def publish_extension(req: PublishExtensionRequest):
+async def publish_extension(req: PublishExtensionRequest, request: Request):
     """Publish an extension on-chain."""
     global _next_extension_id
 
     try:
+        # Get user address for multi-party signing
+        user_address = None
+        try:
+            user_address = _get_authed_address(request)
+        except Exception:
+            pass
+
         # Build transaction arguments
-        # tags must be an array of {type, value} objects for Flow CLI
         tags_array = [{"type": "String", "value": t} for t in (req.tags or [])]
         tx_args = json.dumps([
             {"type": "String", "value": req.name},
@@ -3574,28 +3586,29 @@ async def publish_extension(req: PublishExtensionRequest):
             {"type": "Array", "value": tags_array},
         ])
 
-        # Send transaction
-        result = run_flow_tx("cadence/transactions/publish_extension.cdc", tx_args)
-        success = result is not None and ("sealed" in result.lower() or "success" in result.lower())
+        # Queue for multi-party signing (user authorizer, sponsor payer)
+        _queue_background_tx(
+            user_address or "__global__",
+            "cadence/transactions/publish_extension.cdc",
+            tx_args,
+            description=f"Publish extension: {req.name}",
+        )
 
-        if success:
-            # Cache the operation
-            extension_id = _next_extension_id
-            extensions_cache[extension_id] = {
-                "name": req.name,
-                "description": req.description,
-                "version": req.version,
-                "category": req.category,
-                "sourceHash": req.sourceHash,
-                "tags": req.tags,
-                "isInstalled": False,
-            }
-            _next_extension_id += 1
-            logging.info(f"Extension published: ID={extension_id}, name={req.name}")
-            return ExtensionPublishResponse(extensionId=extension_id, success=True)
-        else:
-            logging.error(f"Failed to publish extension: {result}")
-            raise HTTPException(status_code=500, detail=f"Failed to publish extension on-chain")
+        # Cache the operation immediately (on-chain commit is async)
+        extension_id = _next_extension_id
+        extensions_cache[extension_id] = {
+            "name": req.name,
+            "description": req.description,
+            "version": req.version,
+            "category": req.category,
+            "sourceHash": req.sourceHash,
+            "tags": req.tags,
+            "isInstalled": False,
+            "userAddress": user_address,
+        }
+        _next_extension_id += 1
+        logging.info(f"Extension published: ID={extension_id}, name={req.name}")
+        return ExtensionPublishResponse(extensionId=extension_id, success=True)
 
     except HTTPException:
         raise
@@ -3605,11 +3618,17 @@ async def publish_extension(req: PublishExtensionRequest):
 
 
 @app.post("/extensions/{extension_id}/install")
-async def install_extension(extension_id: int, req: InstallExtensionRequest):
+async def install_extension(extension_id: int, req: InstallExtensionRequest, request: Request):
     """Install an extension."""
     try:
+        # Get user address for multi-party signing
+        user_address = None
+        try:
+            user_address = _get_authed_address(request)
+        except Exception:
+            pass
+
         # Build transaction arguments
-        # config must be a Cadence Dictionary {String: String}
         config_entries = [
             {"key": {"type": "String", "value": k}, "value": {"type": "String", "value": v}}
             for k, v in (req.config or {}).items()
@@ -3619,19 +3638,19 @@ async def install_extension(extension_id: int, req: InstallExtensionRequest):
             {"type": "Dictionary", "value": config_entries},
         ])
 
-        # Send transaction
-        result = run_flow_tx("cadence/transactions/install_extension.cdc", tx_args)
-        success = result is not None and ("sealed" in result.lower() or "success" in result.lower())
+        # Queue for multi-party signing
+        _queue_background_tx(
+            user_address or "__global__",
+            "cadence/transactions/install_extension.cdc",
+            tx_args,
+            description=f"Install extension #{extension_id}",
+        )
 
-        if success:
-            # Update cache
-            if extension_id in extensions_cache:
-                extensions_cache[extension_id]["isInstalled"] = True
-            logging.info(f"Extension installed: ID={extension_id}")
-            return OperationResponse(success=True)
-        else:
-            logging.error(f"Failed to install extension: {result}")
-            raise HTTPException(status_code=500, detail=f"Failed to install extension on-chain")
+        # Update cache immediately
+        if extension_id in extensions_cache:
+            extensions_cache[extension_id]["isInstalled"] = True
+        logging.info(f"Extension installed: ID={extension_id}")
+        return OperationResponse(success=True)
 
     except HTTPException:
         raise
@@ -3641,17 +3660,29 @@ async def install_extension(extension_id: int, req: InstallExtensionRequest):
 
 
 @app.post("/extensions/{extension_id}/uninstall")
-async def uninstall_extension(extension_id: int):
+async def uninstall_extension(extension_id: int, request: Request):
     """Uninstall an extension."""
     try:
+        # Get user address for multi-party signing
+        user_address = None
+        try:
+            user_address = _get_authed_address(request)
+        except Exception:
+            pass
+
         # Build transaction arguments
         tx_args = json.dumps([
             {"type": "UInt64", "value": str(extension_id)},
         ])
 
-        # Send transaction
-        result = run_flow_tx("cadence/transactions/uninstall_extension.cdc", tx_args)
-        success = result is not None and ("sealed" in result.lower() or "success" in result.lower())
+        # Queue for multi-party signing
+        _queue_background_tx(
+            user_address or "__global__",
+            "cadence/transactions/uninstall_extension.cdc",
+            tx_args,
+            description=f"Uninstall extension #{extension_id}",
+        )
+        success = True
 
         if success:
             # Update cache
