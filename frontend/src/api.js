@@ -154,12 +154,12 @@ export const api = {
 
   // Sessions
   async getSessions() {
-    const res = await fetch(`${API_BASE}/sessions`);
+    const res = await fetch(`${API_BASE}/sessions`, { headers: getAuthHeaders() });
     return handleResponse(res);
   },
 
   async getSessionMessages(sessionId) {
-    const res = await fetch(`${API_BASE}/session/${sessionId}/messages`);
+    const res = await fetch(`${API_BASE}/session/${sessionId}/messages`, { headers: getAuthHeaders() });
     return handleResponse(res);
   },
 
@@ -170,17 +170,17 @@ export const api = {
   },
 
   async getMemory() {
-    const res = await fetch(`${API_BASE}/memory`);
+    const res = await fetch(`${API_BASE}/memory`, { headers: getAuthHeaders() });
     return handleResponse(res);
   },
 
   async getTasks() {
-    const res = await fetch(`${API_BASE}/tasks`);
+    const res = await fetch(`${API_BASE}/tasks`, { headers: getAuthHeaders() });
     return handleResponse(res);
   },
 
   async getHooks() {
-    const res = await fetch(`${API_BASE}/hooks`);
+    const res = await fetch(`${API_BASE}/hooks`, { headers: getAuthHeaders() });
     return handleResponse(res);
   },
 
@@ -333,20 +333,21 @@ export const api = {
   async cancelTask(taskId) {
     const res = await fetch(`${API_BASE}/tasks/${taskId}/cancel`, {
       method: 'POST',
+      headers: getAuthHeaders(),
     });
     return handleResponse(res);
   },
 
   // Extensions
   async getExtensions() {
-    const res = await fetch(`${API_BASE}/extensions`);
+    const res = await fetch(`${API_BASE}/extensions`, { headers: getAuthHeaders() });
     return handleResponse(res);
   },
 
   async publishExtension(ext) {
     const res = await fetch(`${API_BASE}/extensions/publish`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body: JSON.stringify(ext),
     });
     return handleResponse(res);
@@ -355,7 +356,7 @@ export const api = {
   async installExtension(extensionId, config = {}) {
     const res = await fetch(`${API_BASE}/extensions/${extensionId}/install`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders(),
       body: JSON.stringify({ config }),
     });
     return handleResponse(res);
@@ -364,13 +365,14 @@ export const api = {
   async uninstallExtension(extensionId) {
     const res = await fetch(`${API_BASE}/extensions/${extensionId}/uninstall`, {
       method: 'POST',
+      headers: getAuthHeaders(),
     });
     return handleResponse(res);
   },
 
   // Multi-Agent
   async getAgents() {
-    const res = await fetch(`${API_BASE}/agents`);
+    const res = await fetch(`${API_BASE}/agents`, { headers: getAuthHeaders() });
     return handleResponse(res);
   },
 
@@ -429,6 +431,7 @@ export const api = {
   async selectAgent(agentId) {
     const res = await fetch(`${API_BASE}/agents/${agentId}/select`, {
       method: 'POST',
+      headers: getAuthHeaders(),
     });
     return handleResponse(res);
   },
@@ -436,40 +439,41 @@ export const api = {
   async deleteAgent(agentId) {
     const res = await fetch(`${API_BASE}/agents/${agentId}`, {
       method: 'DELETE',
+      headers: getAuthHeaders(),
     });
     return handleResponse(res);
   },
 
   // Cognitive Memory
   async getCognitiveState() {
-    const res = await fetch(`${API_BASE}/cognitive/state`);
+    const res = await fetch(`${API_BASE}/cognitive/state`, { headers: getAuthHeaders() });
     return handleResponse(res);
   },
 
   async getCognitiveStats() {
-    const res = await fetch(`${API_BASE}/cognitive/stats`);
+    const res = await fetch(`${API_BASE}/cognitive/stats`, { headers: getAuthHeaders() });
     return handleResponse(res);
   },
 
   async cognitiveRetrieve(query, maxResults = 10) {
-    const res = await fetch(`${API_BASE}/cognitive/retrieve?query=${encodeURIComponent(query)}&max_results=${maxResults}`);
+    const res = await fetch(`${API_BASE}/cognitive/retrieve?query=${encodeURIComponent(query)}&max_results=${maxResults}`, { headers: getAuthHeaders() });
     return handleResponse(res);
   },
 
   async triggerDreamCycle() {
-    const res = await fetch(`${API_BASE}/cognitive/dream`, { method: 'POST' });
+    const res = await fetch(`${API_BASE}/cognitive/dream`, { method: 'POST', headers: getAuthHeaders() });
     return handleResponse(res);
   },
 
   // Task results
   async getTaskResults(taskId) {
-    const res = await fetch(`${API_BASE}/tasks/${taskId}/results`);
+    const res = await fetch(`${API_BASE}/tasks/${taskId}/results`, { headers: getAuthHeaders() });
     return handleResponse(res);
   },
 
   // Automated session (task execution outputs)
   async getAutomatedMessages() {
-    const res = await fetch(`${API_BASE}/session/-1/messages`);
+    const res = await fetch(`${API_BASE}/session/-1/messages`, { headers: getAuthHeaders() });
     return handleResponse(res);
   },
 

@@ -575,16 +575,21 @@ async def background_dream_cycle():
                 logging.info(f"[Dream Cycle] Starting cognitive memory consolidation for user {user_addr}...")
                 result = cognitive_engine.run_dream_cycle()
 
-                # Best-effort on-chain dream cycle
+                # Best-effort on-chain dream cycle (multi-party signed)
                 try:
                     tx_args = json.dumps([
                         {"type": "UFix64", "value": "0.15000000"},  # decay threshold
                         {"type": "UInt64", "value": "3"},           # promotion threshold
                     ])
-                    run_flow_tx("cadence/transactions/run_dream_cycle.cdc", tx_args)
-                    logging.info(f"[Dream Cycle] On-chain dream cycle committed for user {user_addr}")
+                    _queue_background_tx(
+                        user_addr,
+                        "cadence/transactions/run_dream_cycle.cdc",
+                        tx_args,
+                        description=f"Dream cycle for {user_addr[:10]}...",
+                    )
+                    logging.info(f"[Dream Cycle] On-chain dream cycle queued for user {user_addr}")
                 except Exception as e:
-                    logging.warning(f"[Dream Cycle] On-chain commit failed for user {user_addr}: {e}")
+                    logging.warning(f"[Dream Cycle] On-chain queue failed for user {user_addr}: {e}")
 
                 # Best-effort commit new bonds on-chain
                 for from_id, bond_list in cognitive_engine.bonds.items():
@@ -596,7 +601,12 @@ async def background_dream_cycle():
                                 {"type": "UInt8", "value": str(bond.bond_type)},
                                 {"type": "UFix64", "value": f"{bond.strength:.8f}"},
                             ])
-                            run_flow_tx("cadence/transactions/create_memory_bond.cdc", tx_args)
+                            _queue_background_tx(
+                                user_addr,
+                                "cadence/transactions/create_memory_bond.cdc",
+                                tx_args,
+                                description=f"Memory bond {bond.from_id}->{bond.to_id}",
+                            )
                         except Exception:
                             pass  # Best-effort
 
